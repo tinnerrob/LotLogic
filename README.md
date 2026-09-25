@@ -159,6 +159,8 @@ PalletAuctionBidTool/
     ├── BrowserPanelView.swift       Shows the real page (captcha / MFA hand-off)
     ├── LotPageSheetView.swift       A lot's own page as a sheet, behind the row's Open button and
     │                                its lot number — its own web view, the scraper's cookies
+    ├── ResizableSheetWindow.swift   The one bit that makes a web-page sheet's window draggable, plus
+    │                                the size both such sheets are built from (`WebPageSheetSize`)
     ├── LogConsoleView.swift         Folding activity console (folded, it shows the newest line; its
     │                                own chevron is the only control for it)
     └── ProgressFooterView.swift     Progress bar, counters, running totals
@@ -252,7 +254,9 @@ call a provider. A lot handed to the coordinator already carries the number the 
    individual treatment, for a metered key. **Open** is the same page in a sheet over the table — the
    photographs, the full description and the bid history, with nothing sent anywhere and with the
    run's session behind it, so it arrives signed in. Safari stays one click away in that sheet's
-   header. The toolbar does the same pair for every lot at once (**Eval all** / **Price all**),
+   header, and the sheet's own edges are drag handles — the page area opens at the size it always
+   has and can be pulled out to whatever the photographs want. The toolbar does the same pair for
+   every lot at once (**Eval all** / **Price all**),
    skipping only lots that already have the figure
    being asked for — a lot the site has marked sold is still priceable (deviation 22). Several rows
    may scan at once; outbound calls are spaced by the shared `RequestPacer` so
@@ -373,7 +377,8 @@ paginates for ever cannot hold a run open.
 A hidden web view cannot be clicked, so the app hands the real page back to you:
 
 * Press **Page** in the control panel (or let a challenge open it automatically) to see the live
-  `WKWebView` — the *same* instance the automation is driving, cookies included.
+  `WKWebView` — the *same* instance the automation is driving, cookies included. The sheet's edges are
+  drag handles, so a challenge screen can be given the room it needs.
 * Solve the captcha / enter the MFA code there, press **Done**, then **Scrape Lots** again.
   Because the app reuses one web view and one data store, the run resumes authenticated.
 * The automation keeps running while the sheet is open, so page logs stay live in the console.
@@ -645,7 +650,15 @@ driving a consumer web page" is not, deliberately.
     so the page arrives signed in with the session the run just earned, the automation's page never
     moves, and a challenge cleared in the sheet counts for the next run as well. Safari is still one
     click away — **Open in Browser** in that sheet's header — for printing or a site that misbehaves
-    in a web view, so the old behaviour became a choice rather than a dead end. The three of them are
+    in a web view, so the old behaviour became a choice rather than a dead end. The sheet can be dragged
+    to the size the page wants, which is not something a SwiftUI sheet does on its own: one arrives as
+    a title-bar-less `docModal` window with no `.resizable` in its style mask, and SwiftUI rewrites
+    the window's own minimum and maximum on every layout pass, so the content adds the missing bit to
+    that mask itself (`resizableSheetWindow()`) instead of giving up `.sheet(item:)` and
+    reimplementing **Done** and the escape key for a hand-hosted `NSWindow`. A gallery, a long
+    description and a bid history are read rather than glanced at, so the same opening size and the
+    same drag apply to the **Page** panel too — one value, `WebPageSheetSize`, for both sheets. The
+    three of them are
     fixed chrome in a column of their own — `LotColumn.scan`, untitled (`LotColumn.scanTitle` is empty:
     three labelled buttons do not need a legend over them, and the header still draws a cell of that
     width to lay them out under) — because a table that cannot price a row is not a table, and their

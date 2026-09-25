@@ -74,13 +74,26 @@ struct LotPageSheetView: View {
             header
             Divider()
             ZStack(alignment: .top) {
+                // Size comes from `WebPageSheetSize` and the drag: the area starts at the size this
+                // sheet has always opened at, pins the smallest worth reading, and takes whatever the
+                // operator drags the window out to.
                 LotPageSurface(url: request.url, page: page)
-                    .frame(minWidth: 940, idealWidth: 1180, minHeight: 620, idealHeight: 760)
+                    .frame(
+                        minWidth: WebPageSheetSize.minimum.width,
+                        idealWidth: WebPageSheetSize.ideal.width,
+                        maxWidth: .infinity,
+                        minHeight: WebPageSheetSize.minimum.height,
+                        idealHeight: WebPageSheetSize.ideal.height,
+                        maxHeight: .infinity
+                    )
                 if let failure = page.failureText {
                     failureBanner(failure)
                 }
             }
         }
+        // The page is read, not glanced at: a gallery, a long description and a bid history in a sheet
+        // the size of the table's own default are worth being able to grow.
+        .resizableSheetWindow()
     }
 
     /// The same header the page panel carries, for the same reason: what is on screen, where it came

@@ -27,9 +27,19 @@ struct BrowserPanelView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            // Same size story as `LotPageSheetView`: the live page starts where it always has, and the
+            // operator drags the sheet out to whatever a challenge screen needs.
             PageSurfaceView(webView: webView)
-                .frame(minWidth: 940, idealWidth: 1180, minHeight: 620, idealHeight: 760)
+                .frame(
+                    minWidth: WebPageSheetSize.minimum.width,
+                    idealWidth: WebPageSheetSize.ideal.width,
+                    maxWidth: .infinity,
+                    minHeight: WebPageSheetSize.minimum.height,
+                    idealHeight: WebPageSheetSize.ideal.height,
+                    maxHeight: .infinity
+                )
         }
+        .resizableSheetWindow()
         .task {
             while !Task.isCancelled {
                 let current = webView.url?.absoluteString
