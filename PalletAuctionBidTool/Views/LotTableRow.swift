@@ -664,7 +664,13 @@ struct LotTableRow: View {
     }
 
     private var statusDetail: String {
-        switch lot.analysisState {
+        // A thorough scan reports each photograph as it lands, so the row says which frame is being read
+        // instead of showing one unchanging line for the whole gallery. The single-pass path reports
+        // nothing and keeps the old wording.
+        if case .analyzing = lot.analysisState, !lot.photoScanNote.isEmpty {
+            return lot.photoScanNote
+        }
+        return switch lot.analysisState {
         case .pending:
             "queued"
         case .analyzing:
@@ -897,6 +903,14 @@ struct LotDetailRow: View {
                         .help("DeepSeek reads the listing text first, then the photographs, and reconciles the two.")
                 }
                 Label("\(lot.itemCount) item(s) discovered", systemImage: "shippingbox")
+                if lot.hasReadings {
+                    Label(lot.readingSummary.compactPhrase, systemImage: "photo.stack")
+                        .help(
+                            "Each of these photographs was read on its own and the readings were then "
+                                + "reconciled into the line items above. A figure can be checked "
+                                + "against the frame it came from."
+                        )
+                }
                 if let request = LotPageRequest(lot: lot) {
                     Button("Open lot page") { onOpenPage(request) }
                         .buttonStyle(.link)
@@ -905,6 +919,10 @@ struct LotDetailRow: View {
             }
             .font(.caption2)
             .foregroundStyle(.tertiary)
+
+            if lot.hasReadings {
+                readingsBlock
+            }
         }
         .padding(.leading, Theme.rowInset)
         .padding(.trailing, Theme.rowInset)
@@ -912,6 +930,49 @@ struct LotDetailRow: View {
         .frame(width: widths.totalWidth, alignment: .leading)
         .background(Color.primary.opacity(0.02))
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.rule.opacity(0.6)).frame(height: 1) }
+    }
+
+    /// What each photograph showed, one line per frame — the part of a thorough scan that is *evidence*
+    /// rather than a figure.
+    ///
+    /// The card is where this belongs: the pallet's line items are the reconciled answer, and these are
+    /// the observations they were built from, so a price that looks wrong can be traced to the frame it
+    /// was read out of without spending another request. Every photograph the scan opened is listed,
+    /// including the ones that turned out to hold nothing — an empty frame is a fact about the pallet.
+    private var readingsBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Photographs read one by one: \(lot.readingSummary.logPhrase)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+
+            ForEach(lot.readings.inGalleryOrder) { reading in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(reading.positionText)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 96, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(reading.displayName)
+                            .font(.caption2)
+                            .foregroundStyle(reading.isEmpty ? .tertiary : .secondary)
+                            .textSelection(.enabled)
+                        if !reading.detailPhrase.isEmpty || !reading.identifiers.isEmpty {
+                            Text(
+                                [reading.detailPhrase, reading.identifiers.joined(separator: " · ")]
+                                    .filter { !$0.isEmpty }
+                                    .joined(separator: " · ")
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+        .help("One model request per photograph, kept on this machine and reused by the next scan of "
+            + "this lot with the same model.")
     }
 }
 

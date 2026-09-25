@@ -277,7 +277,42 @@ struct ControlPanelView: View {
                 }
                 .help(settings.provider.pacingHelp)
             }
+
+            tuningField("Photos / scan") {
+                photoScanPicker
+            }
         }
+    }
+
+    /// How many of a lot's photographs a scan reads one at a time.
+    ///
+    /// The one setting that changes what a scan *is* rather than how fast it runs: reading a pallet
+    /// photograph by photograph is what keeps a small item in the corner of a frame from being
+    /// averaged away by the pallet in front of it, and it costs one request per photograph. The
+    /// default — every photograph the lot carries — is the answer that spends what the job is worth;
+    /// the counts are the ceiling for a metered key. What is past the ceiling is not dropped: those
+    /// photographs still travel with the reconciliation request, so a ceiling makes the line items
+    /// coarser, never the pallet smaller.
+    private var photoScanPicker: some View {
+        Picker("Photos / scan", selection: $settings.photosPerScan) {
+            Text(everyPhotographLabel).tag(0)
+            ForEach(AppSettings.photoScanChoices.filter { $0 > 0 }, id: \.self) { count in
+                Text("\(count) photographs").tag(count)
+            }
+        }
+        .pickerStyle(.menu)
+        .help(photoScanHelp)
+    }
+
+    /// What the menu calls "read each photograph on its own".
+    private var everyPhotographLabel: String { "All photographs" }
+
+    private var photoScanHelp: String {
+        "How many of a lot's photographs are read one by one, then reconciled into the lot's line "
+            + "items. \(everyPhotographLabel) is what the app defaults to and what the prices are "
+            + "worth checking against: each reading names what one frame showed, so a figure can be "
+            + "traced back to a picture. Readings are kept on this machine, so re-scanning a lot with "
+            + "the same model only pays for the photographs it has never seen."
     }
 
     /// The page budget as a menu of counts rather than a stepper: a listing can be longer than any

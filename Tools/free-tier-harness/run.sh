@@ -27,8 +27,12 @@ swiftc -swift-version 6 -o "$out/harness" \
     "$root/PalletAuctionBidTool/Models/ScrapeProfile.swift" \
     "$root/PalletAuctionBidTool/Models/ScrapeProfilePresets.swift" \
     "$root/PalletAuctionBidTool/Models/ValuationProvider.swift" \
+    "$root/PalletAuctionBidTool/Models/PhotoReading.swift" \
     "$root/PalletAuctionBidTool/Services/LotValuation.swift" \
     "$root/PalletAuctionBidTool/Services/LotImageDigest.swift" \
+    "$root/PalletAuctionBidTool/Services/LotPhotoScan.swift" \
+    "$root/PalletAuctionBidTool/Services/LotPhotoScanPrompt.swift" \
+    "$root/PalletAuctionBidTool/Services/PhotoReadingStore.swift" \
     "$root/PalletAuctionBidTool/Services/GeminiValuationService.swift" \
     "$root/PalletAuctionBidTool/Services/DeepSeekValuationService.swift" \
     "$root/Tools/free-tier-harness/main.swift"

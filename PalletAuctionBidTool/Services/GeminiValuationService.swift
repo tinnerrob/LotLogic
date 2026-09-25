@@ -34,6 +34,16 @@ import Foundation
 ///
 /// This endpoint is the only one with a free tier, which is why it is the default.
 ///
+/// ## One photograph at a time
+/// When `photoScan` is enabled, `value(subject:)` does not send the gallery in one request: it sends
+/// **one request per photograph** — the single-image question in `LotPhotoScanPrompt`, with that
+/// frame's own barcode reading attached — stores each reading, and then sends one text-only
+/// reconciliation over the readings (`LotPhotoScan`). It costs *n* + 1 requests instead of 1 and buys
+/// line items that name where in the pallet each product was, how it was packed and how many units
+/// were visible; readings already on this machine are reused rather than re-bought
+/// (`PhotoReadingStore`). The single pass over the whole gallery remains the default and the fallback,
+/// so nothing that does not opt in behaves differently.
+///
 /// ## Why `@unchecked Sendable`
 /// All stored properties are immutable value/`let` references, and the only shared mutable
 /// object is `URLSession`, which is documented as safe to use from multiple threads. The
@@ -86,6 +96,20 @@ struct GeminiValuationService: ValuationService, @unchecked Sendable {
     /// Attempts per request: the first try plus retries for quota and gateway errors.
     private let maxAttempts: Int
 
+    /// How this service reads a lot's photographs.
+    ///
+    /// Defaults to the single pass over the whole gallery, so a caller that has said nothing about it
+    /// gets exactly the behaviour this service had before the thorough path existed; the app passes
+    /// `PhotoScanPlan.thorough(...)` in (`AppSettings.photoScanPlan`).
+    let photoScan: PhotoScanPlan
+
+    /// Where per-photograph readings are remembered between scans (`PhotoReadingStore`).
+    let store: PhotoReadingStore
+
+    /// Progress for a caller with somewhere to print it — the coordinator turns these into console
+    /// lines and into the live note on the row being scanned.
+    private let report: @Sendable (PhotoScanReport) -> Void
+
     init(
         apiKey: String,
         modelID: String = GeminiValuationService.defaultModelID,
@@ -93,7 +117,10 @@ struct GeminiValuationService: ValuationService, @unchecked Sendable {
         maxImageBytes: Int = 6_000_000,
         maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
         requestsPerMinute: Int = 0,
-        maxAttempts: Int = 4
+        maxAttempts: Int = 4,
+        photoScan: PhotoScanPlan = .disabled,
+        store: PhotoReadingStore = .shared,
+        report: @escaping @Sendable (PhotoScanReport) -> Void = { _ in }
     ) {
         self.apiKey = apiKey
         self.modelID = modelID.isEmpty ? Self.defaultModelID : modelID
@@ -101,6 +128,9 @@ struct GeminiValuationService: ValuationService, @unchecked Sendable {
         self.maxImageBytes = maxImageBytes
         self.maxTotalImageBytes = maxTotalImageBytes
         self.maxAttempts = max(1, maxAttempts)
+        self.photoScan = photoScan
+        self.store = store
+        self.report = report
         self.pacer = requestsPerMinute > 0 ? RequestPacer(requestsPerMinute: requestsPerMinute) : nil
     }
 
@@ -128,8 +158,37 @@ struct GeminiValuationService: ValuationService, @unchecked Sendable {
 
         // Read the photographs here first. Barcodes and label identifiers are the two things a
         // general vision model reads worst off a photograph and the two things this machine reads
-        // natively, so the reading becomes literal text in the prompt (see `LotImageDigest`).
-        let evidence = await LotImageDigest.read(download.images)
+        // natively, so the reading becomes literal text in the prompt (see `LotImageDigest`). Read per
+        // photograph, so the thorough path can quote each frame's own digits and the single pass can
+        // roll them up exactly as it always did.
+        let labels = download.images.isEmpty ? [] : await LotImageDigest.readEach(download.images)
+        let evidence = LotImageDigest.merge(labels)
+
+        // One request per photograph, then a reconciliation, when the operator asked for it.
+        if photoScan.isEnabled, !download.images.isEmpty {
+            switch await photoScanResult(
+                subject: subject,
+                description: description,
+                download: download,
+                labels: labels,
+                evidence: evidence
+            ) {
+            case .completed(let outcome):
+                return outcome
+            case .unavailable(let error):
+                // A stopped run has to stay stopped: falling back to a gallery pass here would send a
+                // request nobody is waiting for any more.
+                if ValuationCancellation.isCancellation(error) { throw error }
+                report(
+                    PhotoScanReport(
+                        lotNumber: subject.lotNumber,
+                        event: .fallingBack(reason: ValuationError.describe(error))
+                    )
+                )
+            case .off:
+                break
+            }
+        }
 
         let body = try requestBody(
             subject: subject,
@@ -159,6 +218,92 @@ struct GeminiValuationService: ValuationService, @unchecked Sendable {
         let body = try prePriceRequestBody(description: LotValuationPrompt.listingText(for: subject))
         let answer = try await send(body)
         return try decodePrePrice(from: answer)
+    }
+
+    /// The thorough path: one request per photograph, then one reconciliation.
+    ///
+    /// - Returns: `.completed` when the readings produced a valuation; `.unavailable` with the reason
+    ///   when they did not, so `value(subject:)` can decide whether a single pass over the gallery is
+    ///   still worth paying for.
+    private func photoScanResult(
+        subject: ValuationSubject,
+        description: String,
+        download: LotImageDownload,
+        labels: [LotImageEvidence],
+        evidence: LotImageEvidence
+    ) async -> LotPhotoScan.RunResult<ValuationOutcome> {
+        let result = await LotPhotoScan.run(
+            subject: subject,
+            description: description,
+            images: download.images,
+            labels: labels,
+            plan: photoScan,
+            store: store,
+            read: { [self] request in try await readPhoto(request) },
+            aggregate: { [self] request in try await aggregate(request) },
+            report: report
+        )
+
+        switch result {
+        case .off:
+            return .off
+        case .unavailable(let error):
+            return .unavailable(error)
+        case .completed(let scan):
+            return .completed(
+                ValuationOutcome(
+                    items: scan.items,
+                    imagesAvailable: subject.imageURLs.count,
+                    imagesSent: download.images.count,
+                    imagesSkipped: download.overBudget.count,
+                    modelID: modelID,
+                    // Every photograph read, plus the reconciliation: the number of model requests the
+                    // figures rest on.
+                    passes: scan.requests + 1,
+                    evidence: evidence,
+                    readings: scan.readings,
+                    readingsFromStore: scan.reused,
+                    scanRequests: scan.requests,
+                    reconciliationFailure: scan.aggregationFailure
+                )
+            )
+        }
+    }
+
+    /// Reads **one** photograph: a single-image `:generateContent` call carrying the per-photograph
+    /// question, the per-photograph reader output and the per-photograph schema.
+    ///
+    /// The answer describes that frame alone, which is what makes a reconciliation possible later: a
+    /// reading that had already averaged in its neighbours would give the reconciliation nothing to
+    /// weigh.
+    func readPhoto(_ request: PhotoReadingRequest) async throws -> PhotoReading {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ValuationError.missingAPIKey
+        }
+        let body = try photoReadingRequestBody(request)
+        let answer = try await send(body)
+        let (text, finishReason) = try answerText(from: answer)
+        return try LotPhotoScanAnswer.reading(
+            fromAnswerText: text,
+            finishReason: finishReason,
+            request: request,
+            modelID: modelID
+        )
+    }
+
+    /// Reconciles a lot's readings into its line items: a text-only call over the readings, plus any
+    /// photographs a ceiling kept out of the per-image path.
+    ///
+    /// The answer is decoded as a normal item list, because the reconciliation is asked for exactly
+    /// the schema a single pass is (`LotValuationPrompt.itemsSchema`) — which is why a thorough scan's
+    /// rows and a single-pass one's are the same shape.
+    func aggregate(_ request: PhotoAggregationRequest) async throws -> [DiscoveredItem] {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ValuationError.missingAPIKey
+        }
+        let body = try aggregationRequestBody(request)
+        let answer = try await send(body)
+        return try decodeItems(from: answer)
     }
 }
 
@@ -354,6 +499,59 @@ extension GeminiValuationService {
             )
         )
         return try JSONEncoder().encode(request)
+    }
+
+    /// Builds the single-photograph `:generateContent` body.
+    ///
+    /// One image part, always: this request answers a question about one frame, and the reading that
+    /// comes back says which frame it was — so the reconciliation can weigh it against the others
+    /// rather than averaging them together.
+    private func photoReadingRequestBody(_ request: PhotoReadingRequest) throws -> Data {
+        let body = GenerateContentRequest(
+            systemInstruction: GenerateContentRequest.SystemInstruction(
+                parts: [GenerateContentRequest.TextPart(text: LotPhotoScanPrompt.readingSystemInstruction)]
+            ),
+            contents: [
+                GenerateContentRequest.Content(
+                    role: "user",
+                    parts: [
+                        .text(LotPhotoScanPrompt.userPrompt(request)),
+                        .image(mimeType: request.image.mimeType, base64: request.image.base64)
+                    ]
+                )
+            ],
+            generationConfig: GenerateContentRequest.GenerationConfig(
+                temperature: 0.2,
+                responseMimeType: "application/json",
+                responseSchema: LotPhotoScanPrompt.readingSchema
+            )
+        )
+        return try JSONEncoder().encode(body)
+    }
+
+    /// Builds the reconciliation `:generateContent` body.
+    ///
+    /// Text-only in the default configuration, where every photograph was read on its own: the
+    /// readings already carry what the photographs showed. A ceiling on the per-image path leaves
+    /// photographs unread, and those travel here as image parts, so a scan never sees less of a lot
+    /// than a single pass would have. The output shape is the ordinary item schema, which is what
+    /// makes a reconciled valuation indistinguishable downstream.
+    private func aggregationRequestBody(_ request: PhotoAggregationRequest) throws -> Data {
+        var parts: [RequestPart] = [.text(LotPhotoScanPrompt.aggregationPrompt(request))]
+        parts.append(contentsOf: request.leftoverImages.map { .image(mimeType: $0.mimeType, base64: $0.base64) })
+
+        let body = GenerateContentRequest(
+            systemInstruction: GenerateContentRequest.SystemInstruction(
+                parts: [GenerateContentRequest.TextPart(text: LotPhotoScanPrompt.aggregationSystemInstruction)]
+            ),
+            contents: [GenerateContentRequest.Content(role: "user", parts: parts)],
+            generationConfig: GenerateContentRequest.GenerationConfig(
+                temperature: 0.2,
+                responseMimeType: "application/json",
+                responseSchema: LotValuationPrompt.itemsSchema
+            )
+        )
+        return try JSONEncoder().encode(body)
     }
 
     /// POSTs the request and decodes the envelope.

@@ -38,6 +38,7 @@ final class AppSettings {
         static let lowBidPercent = "bidTargetLowPercent"
         static let anchorThreshold = "anchorItemThreshold"
         static let hiddenColumns = "hiddenColumns"
+        static let photosPerScan = "photosPerScan"
     }
 
     /// How many lots a batch appraises at the same time.
@@ -54,6 +55,27 @@ final class AppSettings {
     /// allowance, so an unconfigured key does not have to be throttled by the API. DeepSeek meters
     /// concurrency rather than requests per minute, so raise it (or set it to `0`) there.
     static let defaultRequestsPerMinute = 10
+
+    /// How many of a lot's photographs a scan reads **one at a time** by default: every one the lot
+    /// carries.
+    ///
+    /// This is the thorough path's one real cost, and the reason the default is "all of them" rather
+    /// than a token number is that a pallet's photographs are its evidence: a frame the scan skipped is
+    /// a row of goods nobody priced. The ceiling exists for a metered key, not for the app — see
+    /// `photosPerScan`.
+    static let defaultPhotosPerScan = 0
+
+    /// Most a scan will read one at a time, however the setting is stored.
+    ///
+    /// Past a couple of dozen frames a lot is a warehouse rather than a pallet, and the reconciliation
+    /// request — which carries every reading anyway — is the cheaper place to spend the tail.
+    static let maximumPhotosPerScan = 32
+
+    /// The counts the **Photos / scan** menu offers, most generous last. `0` is every photograph.
+    static let photoScanChoices = [0, 4, 8, 12, 16, 24]
+
+    /// Photographs in flight at once, whatever the plan says; see `PhotoScanPlan.concurrency`.
+    static let photoScanConcurrency = PhotoScanPlan.defaultConcurrency
 
     /// Most recently used auction URL.
     var auctionURL: String
@@ -89,6 +111,16 @@ final class AppSettings {
     /// Ceiling on outbound valuation requests per minute, so a metered key gets paced locally
     /// instead of being refused by the API. `0` means "no pacing".
     var requestsPerMinute: Int
+
+    /// How many of a lot's photographs a scan reads **one at a time**, from the front of the gallery;
+    /// `0` — the shipped default — means every photograph the lot carries.
+    ///
+    /// A thorough scan asks a separate question about each photograph and then reconciles the answers,
+    /// which is what makes a thirty-dollar item in the corner of frame nine show up in the line items
+    /// instead of being averaged away by the pallet in front of it. The cost is one request per
+    /// photograph, so this is the ceiling a metered key sets: photographs past it are not dropped —
+    /// they travel with the reconciliation request — but they are not read individually either.
+    var photosPerScan: Int
 
     /// Percent of resale worth bidding on a High-confidence valuation.
     var highBidPercent: Int
@@ -132,6 +164,15 @@ final class AppSettings {
             0,
             defaults.object(forKey: Key.requestsPerMinute) as? Int ?? Self.defaultRequestsPerMinute
         )
+        // Read as an object again, so a deliberate 0 ("every photograph") survives a relaunch instead
+        // of being mistaken for "never configured" and silently becoming every photograph anyway.
+        photosPerScan = max(
+            0,
+            min(
+                defaults.object(forKey: Key.photosPerScan) as? Int ?? Self.defaultPhotosPerScan,
+                Self.maximumPhotosPerScan
+            )
+        )
         // Read every numeric as an object so a deliberate value (including 0) survives a relaunch
         // instead of being mistaken for "never configured"; nil falls back to the shipped policy.
         let defaultPolicy = BidTargetPolicy.standard
@@ -162,6 +203,32 @@ final class AppSettings {
 
     /// `true` while the page budget is **All pages** rather than a count.
     var walksEveryPage: Bool { pageLimit <= 0 }
+
+    /// Photographs per scan clamped into what the pipeline can honour.
+    var effectivePhotosPerScan: Int { max(0, min(photosPerScan, Self.maximumPhotosPerScan)) }
+
+    /// `true` while a scan reads **every** photograph of a lot one at a time, which is the default.
+    var readsEveryPhotograph: Bool { effectivePhotosPerScan <= 0 }
+
+    /// The photograph budget in words, for the run log and the status line.
+    var photoScanSummary: String {
+        readsEveryPhotograph
+            ? "every photograph"
+            : "the first \(effectivePhotosPerScan) photograph(s)"
+    }
+
+    /// The thorough-scan plan the selected provider is built with.
+    ///
+    /// One place builds it, so the model it names, the ceiling it applies and the store it consults
+    /// are the same for both transports — which is what makes "the reading was reused" mean the same
+    /// thing whichever key paid for it.
+    func photoScanPlan() -> PhotoScanPlan {
+        .thorough(
+            modelID: activeModelID,
+            perImageLimit: effectivePhotosPerScan,
+            concurrency: Self.photoScanConcurrency
+        )
+    }
 
     /// The page budget in words, for the run log and the status line.
     var pageLimitSummary: String {
@@ -275,6 +342,7 @@ final class AppSettings {
         defaults.set(deepSeekModelID, forKey: Key.deepSeekModelID)
         defaults.set(pageLimit, forKey: Key.pageLimit)
         defaults.set(requestsPerMinute, forKey: Key.requestsPerMinute)
+        defaults.set(photosPerScan, forKey: Key.photosPerScan)
         defaults.set(highBidPercent, forKey: Key.highBidPercent)
         defaults.set(mediumBidPercent, forKey: Key.mediumBidPercent)
         defaults.set(lowBidPercent, forKey: Key.lowBidPercent)
@@ -302,6 +370,7 @@ final class AppSettings {
         deepSeekModelID = DeepSeekValuationService.defaultModelID
         pageLimit = ScrapeLimits.defaultPages
         requestsPerMinute = Self.defaultRequestsPerMinute
+        photosPerScan = Self.defaultPhotosPerScan
         highBidPercent = BidTargetPolicy.standard.highConfidencePercent
         mediumBidPercent = BidTargetPolicy.standard.mediumConfidencePercent
         lowBidPercent = BidTargetPolicy.standard.lowConfidencePercent

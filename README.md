@@ -17,7 +17,12 @@ hammer falls, whether a lot is worth bidding on.
   photograph is fetched or billed) and **Price** sends that lot's text *and* **every photograph on
   its own page** — the count is the lot's business, so the lot's page answers it instead of a
   setting — and **Open** puts that same page in a window over the table, for the photographs and the fine
-  print nothing has to pay for. The toolbar has the same pair for every lot that has nothing yet.
+  print nothing has to pay for. A **Price** is a *thorough* scan: each photograph is asked about on its
+  own (`LotPhotoScan`), the reading is kept on this machine (`PhotoReadingStore`), and one last request
+  reconciles the readings into the pallet's line items — so a small item in the corner of frame nine is
+  priced rather than averaged away by the pallet in front of it, and re-scanning the same lot with the
+  same model does not pay for the same photograph twice. **Photos / scan** in Run tuning is the ceiling
+  for a metered key; the toolbar has the same pair for every lot that has nothing yet.
   Either reply is constrained to a JSON schema, so the app gets numbers it can add up instead of
   prose — including `evidence`, the label wording or barcode digits each price was built from, since
   the app reads the barcodes and model numbers off the photographs itself before the model sees them
@@ -45,7 +50,9 @@ concurrency warnings. There are no third-party dependencies.
 
 Verify the transports and the table's rules (quota retry, pacing, cancellation, request shaping, both
 DeepSeek passes, how a whole gallery of photographs is attached and trimmed to one request's inline
-budget, the on-device label reader's rules for what counts as a barcode or a model number, every sort
+budget, a whole thorough scan driven end to end — one request per photograph, the readings reused from
+the store on the second scan, and a failed reconciliation falling back to the on-machine merge — the
+on-device label reader's rules for what counts as a barcode or a model number, every sort
 field, the bid ceilings, the anchor threshold, the search matching, the
 column geometry — including how it stretches to fill a wider window — the cleaning of scraped lot
 numbers, the sold / empty-catalogue rules and the address of a listing's later result pages)
@@ -110,6 +117,8 @@ PalletAuctionBidTool/
 │   ├── LotSort.swift                Sort fields + directions + the ordering rules (UI-free)
 │   ├── PreviewSampleLots.swift      Debug-only fixture rows, so the populated table can be previewed
 │   ├── DiscoveredItem.swift         One appraised item inside a lot
+│   ├── PhotoReading.swift           What the model saw in ONE photograph — the unit a thorough scan
+│   │                                is built from, plus its roll-up (`PhotoReadingSummary`)
 │   ├── Formatting.swift             Currency / percent / geometry formatting helpers
 │   ├── ScrapeProfile.swift          Declarative selector strategy (data, not code)
 │   ├── ScrapeProfilePresets.swift   `ScrapeProfile.genericBase()` — the default strategy
@@ -126,6 +135,11 @@ PalletAuctionBidTool/
 │   │                                `RequestPacer`, `ValuationRetry`
 │   ├── LotImageDigest.swift         On-device reading of the photographs: Vision barcodes plus
 │   │                                identifier-shaped label text, handed to the model as literals
+│   ├── LotPhotoScan.swift           The thorough pipeline: one request per photograph, readings
+│   │                                reused from the store, one reconciliation, and the fallbacks
+│   ├── LotPhotoScanPrompt.swift     The per-photograph and reconciliation prompts, the reading
+│   │                                schema and its tolerant decode (`LotPhotoScanAnswer`)
+│   ├── PhotoReadingStore.swift      Readings kept on disk, keyed by lot + model + prompt version
 │   ├── GeminiValuationService.swift REST v1beta `:generateContent` client (schema-constrained)
 │   └── DeepSeekValuationService.swift OpenAI-compatible `/chat/completions` client (json_object,
 │                                    two passes: listing text, then photographs)
@@ -153,8 +167,12 @@ Tools/
 │                                    the table's ordering rules, bid ceilings, anchor flags, search
 │                                    matching, lot-number cleaning, the sold/empty-catalogue rules,
 │                                    column geometry — including stretch-to-fit — the column
-│                                    chooser, and every photograph a lot has being attached and
-│                                    trimmed to one request's inline budget (see Build & run)
+│                                    chooser, every photograph a lot has being attached and
+│                                    trimmed to one request's inline budget, the on-device label
+│                                    reader, and a whole thorough scan driven end to end: one
+│                                    request per photograph, the readings reused from the store on
+│                                    a second scan, and a failed reconciliation falling back to the
+│                                    on-machine merge (see Build & run)
 └── scraper-js-check/                Runs the generated page script against a DOM shim in Node, so
                                      the lot-number *and* sold-badge rules are checked on the page
                                      side too — and so is the lot-page reader, with a `DOMParser` and
@@ -175,8 +193,14 @@ AppSettings ──▶ AnalysisCoordinator.run()          (scrape only)
                      │        └─ window.__PAS.lotPageImages(url) ──▶ every photograph on the lot's
                      │           (one GET, through the loaded listing)   own page ──▶ the subject
                      │                                       │
-                     │                                       ├─ GeminiValuationService.value(...)   (default, 1 pass)
-                     │                                       └─ DeepSeekValuationService.value(...) (2 passes)
+                     │                                       ├─ LotPhotoScan.run(...)                (thorough)
+                     │                                       │    ├─ PhotoReadingStore.readings(...) reuse
+                     │                                       │    ├─ service.readPhoto(...)   one request/frame
+                     │                                       │    ├─ PhotoReadingStore.store(...)    keep
+                     │                                       │    └─ service.aggregate(...)  one reconciliation
+                     │                                       │
+                     │                                       ├─ GeminiValuationService.value(...)   (fallback, 1 pass)
+                     │                                       └─ DeepSeekValuationService.value(...) (fallback, 2 passes)
                      └──────────────────────────────▶ ValuationOutcome ──▶ that LotItem only
 ```
 
@@ -219,18 +243,17 @@ call a provider. A lot handed to the coordinator already carries the number the 
    request, no photograph fetched or billed, no line items, so the row keeps saying "not scanned"
    while its money columns show a provisional figure — the row's `provisional` flag and its italics
    are what say so. **Price** reads that lot's own page first — one GET, through the listing already
-   loaded, so the results page never moves — and then sends the
-   same prompt and the same scraped text plus **every photograph the page carries** (downloaded
-   concurrently, MIME-normalised, then
-   inlined as base64 — `inline_data` parts for Gemini, `image_url` data URLs for DeepSeek) and asks
-   for a JSON array of items with retail/resale estimates. A card only ever shows thumbnails, so the
-   lot's page is where the photographs are, and how many there are varies per lot: the page decides,
-   not a setting (deviation 24). **Open** is the same page in a sheet over the table — the
+   loaded, so the results page never moves — and then reads the lot *photograph by photograph*:
+   every image on the page is downloaded concurrently and MIME-normalised, each one gets its own
+   request (`inline_data` parts for Gemini, `image_url` data URLs for DeepSeek), and only then is the
+   gallery reconciled into the pallet's line items in one further request. A card only ever shows
+   thumbnails, so the lot's page is where the photographs are, and how many there are varies per lot:
+   the page decides, not a setting (deviation 24) — **Photos / scan** then caps how many get the
+   individual treatment, for a metered key. **Open** is the same page in a sheet over the table — the
    photographs, the full description and the bid history, with nothing sent anywhere and with the
    run's session behind it, so it arrives signed in. Safari stays one click away in that sheet's
-   header. The toolbar
-   does the same pair for every lot at
-   once (**Eval all** / **Price all**), skipping only lots that already have the figure
+   header. The toolbar does the same pair for every lot at once (**Eval all** / **Price all**),
+   skipping only lots that already have the figure
    being asked for — a lot the site has marked sold is still priceable (deviation 22). Several rows
    may scan at once; outbound calls are spaced by the shared `RequestPacer` so
    **Requests / min** still means something during a batch. The table's toolbar also carries a
@@ -248,16 +271,57 @@ call a provider. A lot handed to the coordinator already carries the number the 
    the lot's *weakest* confidence level, and red once the live bid passes it. A ceiling that rests on
    an **Eval** rather than a **Price** is drawn in italics, so a first look never reads as a measured
    number. Expanding a row lists the appraised items — each with the label text, barcode digits or
-   model number the price rests on under its name — and any
+   model number the price rests on under its name — and, for a lot that was read photograph by
+   photograph, one line per frame saying what that frame showed (`photograph 3 of 12 — 4 visible ·
+   $19 ea retail · sealed retail · front left`). That list is the point of the thorough scan: a figure
+   can be traced back to a picture, and the frame that held nothing is listed as holding nothing
+   rather than omitted. Any
    line at or above the **Anchor ≥** threshold (default $100) is flagged as an anchor. The footer
    shows live counters and totals for the whole board.
 
 ### How one scan works
 
+A **Price** is a thorough scan, and the shape of it is the same on both providers — the provider only
+supplies two things: how to ask about one photograph, and how to ask for the reconciliation.
+
+1. **The gallery is fetched.** The lot's own page is read for every photograph it carries (deviation
+   24), the images are downloaded concurrently and MIME-normalised, and each is capped at 6 MB with the
+   whole gallery capped by the request's inline budget.
+2. **A photograph at a time.** One request per photograph, carrying that frame alone, the listing text,
+   and the app's own reading of *that* frame — barcode digits and printed identifiers included. The
+   answer is a `PhotoReading`: what the frame showed, each product group with its location, packaging,
+   condition, the units visible **from that angle** and the label wording it rests on. Requests are
+   paced by the shared `RequestPacer` and run a few at a time (three by default), so a slow provider's
+   latency is hidden without bunching calls.
+3. **The readings are kept.** `PhotoReadingStore` writes them to `~/Library/Application Support`,
+   keyed by lot number, model and prompt version. The next scan of that lot with that model restores
+   them and re-reads only the photographs it has never seen — so **re-scanning costs the
+   reconciliation, not the gallery**, and changing model, or suspecting a bad read, is what the
+   settings modal's **Forget** button is for.
+4. **One reconciliation.** A single request (no photographs unless **Photos / scan** left some out)
+   folds the readings into the pallet's line items, with the quantities and totals that belong to the
+   whole lot: three photographs of the same six cartons are six cartons, not eighteen.
+5. **Two fallbacks, both cheaper than failing the lot.** If the reconciliation request fails, the
+   readings are merged on this machine (`PhotoReadingMerge`) — the photographs that were paid for are
+   not thrown away. If nothing could be read individually at all, the scan falls back to the
+   single-pass appraisal below, which is exactly what a scan was before this pipeline existed.
+
+What a scan never does is drop a photograph: a ceiling (`Photos / scan`, default **All photographs**)
+decides how many frames get the individual treatment, and the rest travel with the reconciliation
+request as images — so a low ceiling makes the line items coarser, never the pallet smaller.
+
+| Provider | Requests per lot | Shape |
+| --- | --- | --- |
+| Gemini | 1 + n | One request per photograph (`n`), then one `responseSchema`-constrained reconciliation |
+| DeepSeek | 1 + n | One request per photograph (`n`), then one `json_object`-mode reconciliation |
+
+The single-pass appraisal is still there, and it is what the fallback runs:
+
 | Provider | Requests per lot | Shape |
 | --- | --- | --- |
 | Gemini | 1 | One multimodal call: listing text + photographs, `responseSchema`-constrained |
 | DeepSeek | 1–2 | Pass 1 reads the listing text alone; pass 2 reads the photographs with pass 1's JSON draft as prior context and is told to correct it |
+
 
 DeepSeek's split is deliberate, and it is the reason it costs roughly twice as much per lot: the
 model reads a product from a photograph measurably better when it already knows what the listing
@@ -327,6 +391,7 @@ A hidden web view cannot be clicked, so the app hands the real page back to you:
 | DeepSeek API key | `UserDefaults` | Sent as `Authorization: Bearer …`, never in a URL or a log line. |
 | Site login cookie | `WKWebsiteDataStore.default()` | App container; persists between launches. |
 | Scraped lots / valuations | memory only | Nothing is written to disk; quitting discards results. |
+| Per-photograph readings | `~/Library/Application Support/<app>/PhotoReadings/` | One JSON file per lot, keyed by model + prompt version, so a re-scan reuses what it already paid for. Cleared from the settings modal's **Forget** button. |
 | Which columns the table shows | `UserDefaults` | Written the moment a column is hidden or shown in the table's gear, so the choice survives a relaunch. Only that key is written — see deviation 23. |
 
 **Known caveat:** credentials and the API keys live in `UserDefaults`, which is not an encrypted
@@ -351,8 +416,15 @@ Three controls keep a free-tier run from failing lots:
 | Control | Behaviour |
 | --- | --- |
 | **Requests / min** (run tuning, default `10`) | Upper bound on outbound calls per minute. `RequestPacer` is a single shared actor, so concurrent lots queue for the next slot instead of bunching. Set it to `0` / "off" to disable pacing. |
+| **Photos / scan** (run tuning, default **All photographs**) | How many of a lot's photographs are read one at a time, and therefore how many requests a **Price** costs. A ceiling reads the first *n* frames individually and still sends the rest with the reconciliation — coarser line items, never a smaller pallet. |
 | **429 retry** | A refusal is waited out, not failed: the delay comes from the `Retry-After` header, else from the `RetryInfo.retryDelay` in Google's error body (`"17s"`), else from exponential back-off with jitter. Up to 4 attempts per request. DeepSeek sends no delay hint, so it always uses the back-off. |
 | **Stop** | Cancellation during a back-off ends the run immediately — a quota pause never holds the app hostage. |
+
+On a free tier, remember that a **Price** now costs one request per photograph plus the
+reconciliation. **Eval all** first is still the cheapest way to find the lots worth photographing, and
+**Photos / scan** is the dial that turns a board of forty-frame lots into something a per-minute quota
+can actually absorb. Readings already on this machine are reused, so re-pricing a lot after a tuning
+change does not re-read its gallery.
 
 Cheapest useful configuration: `gemini-2.5-flash-lite`, **Eval all** before any **Price**, and a
 **Requests / min** you have watched one run of. The run log states the pacing it applied, so a slow
@@ -603,9 +675,10 @@ driving a consumer web page" is not, deliberately.
     names the gear instead of the card. Edits apply as typed — there is no Cancel — which is why the
     footer button says **Done**; both surfaces are built from `SettingsFieldRow`, so the panel's Run
     tuning and the modal cannot drift apart. **Run tuning** stays a folding card: unlike credentials,
-    its numbers are worth watching and changing mid-session. Inside it the six fields now run one per
-    line — `Pages`, then **Requests / min**, a hairline, then the three bid percentages and the anchor
-    threshold — rather than two and then four across. Across the width the captions landed at four
+    its numbers are worth watching and changing mid-session. Inside it the fields now run one per
+    line — `Pages`, then **Requests / min**, then **Photos / scan**, a hairline, then the three bid
+    percentages and the anchor threshold — rather than two and then four across. Across the width the
+    captions landed at four
     different x positions, so the card could not be read down a column, and the controls had to share
     the space: the **Pages** menu wants to say how long *this* listing is, and a menu that has to fit
     beside a stepper in half a window cannot say much. The stacked form costs about 100 points of
@@ -806,9 +879,45 @@ driving a consumer web page" is not, deliberately.
     macOS 15; this app deploys to macOS 14, and an availability split for no behavioural gain is not
     worth it.
 
----
+27. **A photograph is priced on its own, and the readings are reconciled afterwards.** One request over
+    a whole gallery asks the model to hold forty frames in its head at once, and the answer is an
+    average over all of them: a thirty-dollar item in the corner competes with the pallet in front of
+    it and usually loses. So a **Price** is now a *thorough* scan (`LotPhotoScan`), and the transport
+    supplies only two things — how to ask about one photograph, and how to ask for the reconciliation
+    — so both providers run the identical pipeline. (a) *One request per photograph.* The frame, the
+    listing text and the app's own reading of **that** frame travel together, and the answer is a
+    `PhotoReading` (`PhotoObject` per group: name, brand, category, the units visible *from that
+    angle*, per-unit retail and resale, condition, packaging, where in the frame it sat, the
+    identifiers and label wording it rests on, its confidence and its evidence). A reading is
+    *evidence* rather than a conclusion, which is why it is stored as its own type: `quantity` is what
+    one photograph shows, and deciding that three sightings of six cartons are six cartons is the
+    reconciliation's job. (b) *A reading is reused, not re-bought.* `PhotoReadingStore` keeps them in
+    `Application Support/<app>/PhotoReadings/`, one JSON file per lot, keyed by lot number, model and
+    prompt version (`currentVersion`, so changing the question retires the answers to the old one).
+    Re-scanning a lot with the same model costs the reconciliation instead of the gallery — which is
+    the difference between a thorough scan being affordable and being a subscription — and the
+    gallery itself is still fetched from the CDN, because image bytes were never the expensive part.
+    (c) *One request reconciles.* The readings go to the model in gallery order with the instruction
+    to fold duplicates into the pallet's real counts, and the line items that come back are the ones
+    the row already knew how to show. (d) *Two fallbacks, both cheaper than failing the lot.* If the
+    reconciliation request fails, `PhotoReadingMerge` folds the readings into line items on this
+    machine — the photographs that were paid for are not thrown away, and the console says the merge
+    happened rather than the request. If nothing could be read individually at all, the scan falls
+    back to the single-pass gallery appraisal, which is unchanged and still the whole of the old
+    behaviour. (e) *No photograph is ever dropped.* `Photos / scan` (default **All photographs**) caps
+    how many frames get the individual treatment, and the rest travel with the reconciliation request
+    as images, so a ceiling under a per-minute quota makes the line items coarser and never makes the
+    pallet smaller — the same rule as deviation 24, one level down. (f) *The working is visible.* The
+    scanning row says which frame it is on (`photograph 7 of 12 read: 4 product group(s)`), the console
+    carries one line per step and then the roll-up (`12 photographs read one by one — 34 product
+    group(s), 9 identifier(s)`), and the expanded row lists every reading, including the frames that
+    turned out to hold nothing — an empty frame is a fact about the pallet, not a gap. (g) *What it
+    costs.* Requests are linear in the number of photographs: 1 + *n* per lot, or 1 + *n* - *k* when
+    *k* readings were already on this machine. That is the honest price of asking a smaller question
+    once per frame instead of a large one once per pallet, and it is why the ceiling and the store
+    exist rather than being optional extras.
 
-## Retargeting to another auction site
+---
 
 Selectors live in data, not code: edit `ScrapeProfilePresets.genericBase()` or add a new
 `ScrapeProfile` and hand it to `AuctionScraperService(profile:)`. Every list is tried in order,

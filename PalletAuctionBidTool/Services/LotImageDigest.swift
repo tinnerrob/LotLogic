@@ -47,9 +47,25 @@ struct LotImageEvidence: Sendable, Hashable {
     /// What the model is told about the reading, or an empty list when there is nothing to tell.
     var promptLines: [String] {
         guard !isEmpty else { return [] }
+        return report(scope: "these same \(imagesRead) photograph(s)")
+    }
+
+    /// The same lines, for a prompt that carries **one** photograph.
+    ///
+    /// The detail that makes the thorough scan worth its requests: in that path each request holds one
+    /// frame, so quoting the reader's output as "this photograph" is literally true — and a barcode
+    /// decoded off photograph 1 can no longer be mistaken for evidence about the goods in photograph 5
+    /// (see `LotPhotoScan`).
+    var singlePhotographPromptLines: [String] {
+        guard !isEmpty else { return [] }
+        return report(scope: "this photograph")
+    }
+
+    /// The reader's output as prompt text, saying what it was run over.
+    private func report(scope: String) -> [String] {
         var lines = [
-            "A text and barcode reader on the app's own machine has already run over these same "
-                + "\(imagesRead) photograph(s), and reports its literal output:"
+            "A text and barcode reader on the app's own machine has already run over \(scope), and "
+                + "reports its literal output:"
         ]
         if !barcodes.isEmpty {
             lines.append("Decoded barcodes: \(barcodes.joined(separator: ", "))")
@@ -102,6 +118,9 @@ enum LotImageDigest {
 
     /// Photographs looked at per scan. A gallery is usually a handful of angles over the same few
     /// labels, so the first dozen finds what there is to find; the model still receives all of them.
+    ///
+    /// A thorough scan does not lift this cap: the reader's job is to hand over the literal digits,
+    /// and frames past the twelfth are the same cartons from another angle (see `LotPhotoScan`).
     static let maximumImages = 12
 
     /// Identifiers that end the text pass early. Recognising text is the expensive half of a reading —
@@ -138,23 +157,61 @@ enum LotImageDigest {
     static func read(_ images: [LotImage]) async -> LotImageEvidence {
         // Vision and CoreGraphics work is CPU-bound and can take a noticeable slice of a second per
         // photograph, so it is pushed off whatever actor asked for it.
-        await Task.detached { decode(images) }.value
+        await Task.detached { merge(decodeEach(images)) }.value
     }
 
-    private static func decode(_ images: [LotImage]) -> LotImageEvidence {
-        var evidence = LotImageEvidence()
+    /// Reads each photograph **on its own**, one entry per image and in gallery order.
+    ///
+    /// This is what a thorough scan asks for: a request that carries one photograph needs the
+    /// identifiers read on *that* photograph, not a roll-up over the gallery, because a prompt that
+    /// lists four barcodes beside one carton is an invitation to attribute three of them wrongly
+    /// (`LotImageDigest` is shared by both paths, so the roll-up still exists — it is `merge`).
+    ///
+    /// The result has one entry per image *including the ones that could not be opened*, whose entry is
+    /// empty: a caller asking what was read on photograph 7 has to be told nothing, rather than handed
+    /// photograph 6's reading.
+    static func readEach(_ images: [LotImage]) async -> [LotImageEvidence] {
+        await Task.detached { decodeEach(images) }.value
+    }
 
-        for image in images.prefix(maximumImages) {
+    /// Rolls per-photograph readings back up into one lot-wide reading.
+    ///
+    /// Order, duplicates and the caps are exactly what reading the gallery in one pass produced, so a
+    /// scan that reads frame by frame and a scan that reads the lot whole hand the model the same
+    /// literal digits.
+    static func merge(_ readings: [LotImageEvidence]) -> LotImageEvidence {
+        var evidence = LotImageEvidence()
+        for reading in readings {
+            evidence.imagesRead += reading.imagesRead
+            for barcode in reading.barcodes {
+                append(barcode, to: &evidence.barcodes, limit: maximumBarcodes)
+            }
+            for identifier in reading.identifiers {
+                append(identifier, to: &evidence.identifiers, limit: maximumIdentifiers)
+            }
+        }
+        return evidence
+    }
+
+    private static func decodeEach(_ images: [LotImage]) -> [LotImageEvidence] {
+        var readings = Array(repeating: LotImageEvidence(), count: images.count)
+
+        // Identifiers read so far, across the whole gallery. The text recognition budget is lot-wide
+        // rather than per photograph on purpose: once a few identifiers are out, the remaining frames
+        // are the same cartons from another angle, and reading their labels costs the same local time
+        // as it did before this pass was split per photograph. Barcode decoding is a scan for the bars,
+        // so that half keeps running on every frame.
+        var identifiersSeen = 0
+
+        for (index, image) in images.prefix(maximumImages).enumerated() {
             guard let data = Data(base64Encoded: image.base64),
                   let source = CGImageSourceCreateWithData(data as CFData, nil),
                   let picture = CGImageSourceCreateImageAtIndex(source, 0, nil)
             else { continue }
 
-            evidence.imagesRead += 1
+            readings[index].imagesRead = 1
             let handler = VNImageRequestHandler(cgImage: picture, options: [:])
 
-            // Barcodes first, and on every photograph: decoding a UPC is a scan for the bars, which is
-            // cheap, and a code is the single most valuable thing on a pallet photograph.
             let barcodeRequest = VNDetectBarcodesRequest()
             barcodeRequest.symbologies = readSymbologies
             _ = try? handler.perform([barcodeRequest])
@@ -162,13 +219,11 @@ enum LotImageDigest {
                 guard let payload = observation.payloadStringValue,
                       let value = normalise(barcode: payload)
                 else { continue }
-                append(value, to: &evidence.barcodes, limit: maximumBarcodes)
+                append(value, to: &readings[index].barcodes, limit: maximumBarcodes)
             }
 
-            // Text recognition is the expensive half, so it stops once the reading has something to
-            // work with. The requests are separate for the same reason: a refusal in one cannot cost
-            // the other its readings.
-            guard evidence.identifiers.count < enoughIdentifiers else { continue }
+            // The requests are separate, so a refusal in one cannot cost the other its readings.
+            guard identifiersSeen < enoughIdentifiers else { continue }
             let textRequest = VNRecognizeTextRequest()
             // Accurate, not fast: the whole point is the digits of a model number, and language
             // correction is off because it is a spelling model, and "DCS620D" is not a word.
@@ -177,11 +232,13 @@ enum LotImageDigest {
             _ = try? handler.perform([textRequest])
             let lines = (textRequest.results ?? []).compactMap { $0.topCandidates(1).first?.string }
             for identifier in identifiers(in: lines) {
-                append(identifier, to: &evidence.identifiers, limit: maximumIdentifiers)
+                let before = readings[index].identifiers.count
+                append(identifier, to: &readings[index].identifiers, limit: maximumIdentifiers)
+                if readings[index].identifiers.count > before { identifiersSeen += 1 }
             }
         }
 
-        return evidence
+        return readings
     }
 
     /// The identifier-shaped tokens in a block of recognised text.

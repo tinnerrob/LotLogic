@@ -43,6 +43,20 @@ struct DiscoveredItem: Identifiable, Codable, Hashable, Sendable {
     /// the goods alone.
     var evidence: String
 
+    /// How many units of this product the pallet holds, when the answer said — `0` when it did not.
+    ///
+    /// `retailValue` and `resaleValue` stay whole-line-item totals (rule 5 of the prompt is
+    /// explicit), so this is what turns a line into a per-unit price for the operator — and what
+    /// makes a pallet of sixty cheap items comparable with a pallet of six expensive ones.
+    var quantity: Int
+
+    /// 1-based positions of the photographs this line was read from, in gallery order.
+    ///
+    /// Only ever filled by a thorough scan (`LotPhotoScan`), where the price came from specific
+    /// frames rather than from a gallery as a whole. Empty is the honest answer for a single-pass
+    /// appraisal: nothing there knew which picture a figure came from.
+    var photos: [Int]
+
     init(
         id: UUID = UUID(),
         itemName: String,
@@ -50,7 +64,9 @@ struct DiscoveredItem: Identifiable, Codable, Hashable, Sendable {
         retailValue: Double = 0,
         resaleValue: Double = 0,
         notes: String = "",
-        evidence: String = ""
+        evidence: String = "",
+        quantity: Int = 0,
+        photos: [Int] = []
     ) {
         self.id = id
         self.itemName = itemName
@@ -59,6 +75,8 @@ struct DiscoveredItem: Identifiable, Codable, Hashable, Sendable {
         self.resaleValue = resaleValue
         self.notes = notes
         self.evidence = evidence
+        self.quantity = quantity
+        self.photos = photos
     }
 
     /// The confidence vocabulary the model is constrained to (mirrored in
@@ -95,6 +113,40 @@ struct DiscoveredItem: Identifiable, Codable, Hashable, Sendable {
 
     /// `true` when the engine returned usable numbers for this line item.
     var isPriced: Bool { retailValue > 0 || resaleValue > 0 }
+
+    /// `12 unit(s)` — the quantity, when the appraisal named one.
+    var quantityText: String? {
+        guard quantity > 1 else { return nil }
+        return "\(quantity) unit(s)"
+    }
+
+    /// Per-unit retail, when there is both a quantity and a figure to divide by.
+    var unitRetailValue: Double? {
+        guard quantity > 1, retailValue > 0 else { return nil }
+        return retailValue / Double(quantity)
+    }
+
+    /// Per-unit resale, on the same rule as `unitRetailValue`.
+    var unitResaleValue: Double? {
+        guard quantity > 1, resaleValue > 0 else { return nil }
+        return resaleValue / Double(quantity)
+    }
+
+    /// `$35.00 ea retail · $18.00 ea resale` — what one of them goes for, so a line's total can be
+    /// argued with.
+    var unitPricePhrase: String? {
+        var parts: [String] = []
+        if let unitRetailValue { parts.append("\(unitRetailValue.currencyText) ea retail") }
+        if let unitResaleValue { parts.append("\(unitResaleValue.currencyText) ea resale") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// `photograph 3, 7` — which frames this line was read from, when a thorough scan knows.
+    var photoSourceText: String? {
+        guard !photos.isEmpty else { return nil }
+        let positions = photos.sorted().map(String.init).joined(separator: ", ")
+        return photos.count == 1 ? "photograph \(positions)" : "photographs \(positions)"
+    }
 
     /// Resale expressed as a fraction of retail. `nil` when retail is unknown.
     var resaleRatio: Double? {

@@ -24,12 +24,19 @@ struct SiteSettingsSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// How many lots this machine has readings for (`PhotoReadingStore`), and whether a **Forget** is
+    /// in flight. Loaded when the sheet opens, because the store is an actor and the count is a file
+    /// listing — not something to do while drawing a modal.
+    @State private var storedLots = 0
+    @State private var isForgetting = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.groupSpacing) {
             header
             Divider().opacity(0.6)
             siteSessionRow
             valuationRow
+            readingsRow
             warning
             footnotes
             Divider().opacity(0.6)
@@ -37,6 +44,7 @@ struct SiteSettingsSheet: View {
         }
         .padding(Theme.panelPadding + 2)
         .frame(width: 640)
+        .task { await refreshStoredLots() }
     }
 
     // MARK: - Header
@@ -136,6 +144,60 @@ struct SiteSettingsSheet: View {
             Text("Each provider keeps its own key and model, so switching back and forth is lossless.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Row three: the readings this machine has already paid for.
+    ///
+    /// A thorough scan buys an answer about each photograph and keeps it, so re-scanning a lot with the
+    /// same model costs the reconciliation rather than the whole gallery — and that only works while the
+    /// readings stay behind. Forgetting them is therefore a deliberate act with a price, which is why it
+    /// is a button with the count beside it rather than housekeeping that happens on its own.
+    private var readingsRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: Theme.controlSpacing) {
+                Label("Stored readings", systemImage: "photo.stack")
+                    .font(.caption.weight(.medium))
+                Text(storedLotsText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+
+                Spacer(minLength: 12)
+
+                Button("Forget") { forgetReadings() }
+                    .disabled(storedLots == 0 || isForgetting)
+                    .help(
+                        "Readings are what a photograph-by-photograph scan cost. Forgetting them makes "
+                            + "the next scan of every lot read and pay for each photograph again."
+                    )
+            }
+
+            Text(
+                "What each photograph showed, kept per lot and per model. Re-scanning a lot with the same "
+                    + "model reuses them, so only the reconciliation is sent. Changing model, or "
+                    + "suspecting a bad read, is what this button is for."
+            )
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var storedLotsText: String {
+        storedLots == 0 ? "none yet" : "\(storedLots) lot(s)"
+    }
+
+    private func refreshStoredLots() async {
+        storedLots = await PhotoReadingStore.shared.storedLotCount()
+    }
+
+    private func forgetReadings() {
+        isForgetting = true
+        Task {
+            await PhotoReadingStore.shared.forgetAll()
+            await refreshStoredLots()
+            isForgetting = false
         }
     }
 

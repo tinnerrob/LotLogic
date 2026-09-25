@@ -104,6 +104,10 @@ extension LotItem {
 
     /// Valuated, and the row the preview opens: the nested product lines and the description card
     /// are only really judged on an expanded lot.
+    ///
+    /// This is also the one sample that carries readings — a lot priced photograph by photograph — so
+    /// the card's reading list and the row's step note are drawn in a preview rather than only ever
+    /// being looked at against a live auction (`LotPhotoScan`).
     private static func scannedButWaiting() -> LotItem {
         let lot = makeLot(
             number: "77",
@@ -112,7 +116,8 @@ extension LotItem {
             description: """
                 OFFICE CHAIR & DESK LOT - SIT-STAND DESKS AND MESH TASK CHAIRS, SOME ASSEMBLED. \
                 Two benches show cosmetic scratches; mechanisms untested.
-                """
+                """,
+            imageCount: 3
         )
         lot.applyValuation(
             [
@@ -131,7 +136,65 @@ extension LotItem {
                     notes: "Two of the four are missing arm caps."
                 )
             ],
-            imagesAnalyzed: 3
+            imagesAnalyzed: 3,
+            passes: 3,
+            readings: [
+                PhotoReading(
+                    imageURL: lot.imageUrls[0],
+                    imageIndex: 1,
+                    imageCount: 3,
+                    summary: "A sit-stand desk, assembled, seen from the aisle.",
+                    objects: [
+                        PhotoObject(
+                            name: "Electric sit-stand desk",
+                            category: "office",
+                            quantity: 1,
+                            unitRetail: 520,
+                            unitResale: 300,
+                            condition: "shelf wear",
+                            packaging: "open box",
+                            location: "front right, assembled",
+                            identifiers: ["E7B-1200"],
+                            labelText: "electric sit-stand frame, 1200 mm",
+                            confidence: DiscoveredItem.Confidence.high.rawValue,
+                            evidence: "label reads the frame's model number",
+                            notes: "One corner of the desk top is out of frame."
+                        )
+                    ],
+                    notes: "The desk top is partly out of frame.",
+                    modelID: "preview"
+                ),
+                PhotoReading(
+                    imageURL: lot.imageUrls[1],
+                    imageIndex: 2,
+                    imageCount: 3,
+                    summary: "Four mesh chairs stacked, two without arm caps.",
+                    objects: [
+                        PhotoObject(
+                            name: "Mesh task chair",
+                            quantity: 4,
+                            unitRetail: 190,
+                            unitResale: 85,
+                            condition: "shelf wear",
+                            packaging: "no packaging",
+                            location: "rear left, stacked four high",
+                            confidence: DiscoveredItem.Confidence.medium.rawValue,
+                            evidence: "mesh back and base style are recognisable",
+                            notes: "Two of the four are missing arm caps."
+                        )
+                    ],
+                    notes: "",
+                    modelID: "preview"
+                ),
+                PhotoReading(
+                    imageURL: lot.imageUrls[2],
+                    imageIndex: 3,
+                    imageCount: 3,
+                    summary: "Shrink wrap and a shipping label — nothing sellable in this frame.",
+                    notes: "Nothing legible on the label from this angle.",
+                    modelID: "preview"
+                )
+            ]
         )
         return lot
     }
@@ -178,16 +241,16 @@ extension LotItem {
         number: String,
         bid: Double,
         title: String,
-        description: String
+        description: String,
+        imageCount: Int = 2
     ) -> LotItem {
         LotItem(
             lotNumber: number,
             currentBid: bid,
             rawDescription: description,
-            imageUrls: [
-                URL(string: "https://example.invalid/lots/\(number)/1.jpg")!,
-                URL(string: "https://example.invalid/lots/\(number)/2.jpg")!
-            ],
+            imageUrls: (1...max(imageCount, 1)).map {
+                URL(string: "https://example.invalid/lots/\(number)/\($0).jpg")!
+            },
             title: title,
             detailURL: URL(string: "https://example.invalid/lot/\(number)")
         )

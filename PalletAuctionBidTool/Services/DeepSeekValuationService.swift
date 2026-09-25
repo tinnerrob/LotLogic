@@ -83,6 +83,21 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// documented default is `"high"`, and reasoning tokens are billed as output tokens.
     private let reasoningEffort: String?
 
+    /// How this service reads a lot's photographs.
+    ///
+    /// Defaults to the single pass over the whole gallery, so a caller that has said nothing about it
+    /// gets exactly the behaviour this service had before the thorough path existed; the app passes
+    /// `PhotoScanPlan.thorough(...)` in (`AppSettings.photoScanPlan`). DeepSeek's limit is concurrency
+    /// rather than requests per minute, so the thorough path's *n* + 1 requests cost latency here
+    /// rather than quota — which is why the plan's concurrency matters most on this transport.
+    let photoScan: PhotoScanPlan
+
+    /// Where per-photograph readings are remembered between scans (`PhotoReadingStore`).
+    let store: PhotoReadingStore
+
+    /// Progress for a caller with somewhere to print it.
+    private let report: @Sendable (PhotoScanReport) -> Void
+
     init(
         apiKey: String,
         modelID: String = DeepSeekValuationService.defaultModelID,
@@ -91,7 +106,10 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
         requestsPerMinute: Int = 0,
         maxAttempts: Int = 4,
-        reasoningEffort: String? = "none"
+        reasoningEffort: String? = "none",
+        photoScan: PhotoScanPlan = .disabled,
+        store: PhotoReadingStore = .shared,
+        report: @escaping @Sendable (PhotoScanReport) -> Void = { _ in }
     ) {
         self.apiKey = apiKey
         self.modelID = modelID.isEmpty ? Self.defaultModelID : modelID
@@ -99,6 +117,9 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         self.maxImageBytes = maxImageBytes
         self.maxTotalImageBytes = maxTotalImageBytes
         self.maxAttempts = max(1, maxAttempts)
+        self.photoScan = photoScan
+        self.store = store
+        self.report = report
         self.reasoningEffort = reasoningEffort
         self.pacer = requestsPerMinute > 0 ? RequestPacer(requestsPerMinute: requestsPerMinute) : nil
     }
@@ -117,18 +138,6 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         // Every photograph the lot carries, as read off its own page.
         let candidates = subject.imageURLs
 
-        // Pass 1 — the listing text, on its own. A failure here is remembered rather than thrown:
-        // the photographs may still be able to answer.
-        var textItems: [DiscoveredItem]?
-        var textFailure: Error?
-        if !description.isEmpty {
-            do {
-                textItems = try await textPass(description: description)
-            } catch {
-                textFailure = error
-            }
-        }
-
         let download = await LotImageLoader.download(
             candidates,
             maxBytes: maxImageBytes,
@@ -139,6 +148,54 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         // Nothing to reason about at all: neither text nor a single readable photograph.
         guard !download.images.isEmpty || !description.isEmpty else {
             throw ValuationError.noUsableImages(attempted: candidates.count, reason: download.failures.first)
+        }
+
+        // Read the photographs here first: a decoded UPC or a printed model number is the strongest
+        // pricing evidence a pallet photograph can hold, and it is the one thing the provider's own
+        // vision pass is least reliable at (see `LotImageDigest`). Read per photograph, so the thorough
+        // path can quote each frame's own digits and the passes below can roll them up exactly as they
+        // always did.
+        let labels = download.images.isEmpty ? [] : await LotImageDigest.readEach(download.images)
+        let evidence = LotImageDigest.merge(labels)
+
+        // One request per photograph, then a reconciliation, when the operator asked for it. The
+        // listing text rides along in every one of those asks, so the two-pass split below is not
+        // needed — and not paid for either.
+        if photoScan.isEnabled, !download.images.isEmpty {
+            switch await photoScanResult(
+                subject: subject,
+                description: description,
+                download: download,
+                labels: labels,
+                evidence: evidence
+            ) {
+            case .completed(let outcome):
+                return outcome
+            case .unavailable(let error):
+                // A stopped run has to stay stopped: falling back here would send a request nobody is
+                // waiting for any more.
+                if ValuationCancellation.isCancellation(error) { throw error }
+                report(
+                    PhotoScanReport(
+                        lotNumber: subject.lotNumber,
+                        event: .fallingBack(reason: ValuationError.describe(error))
+                    )
+                )
+            case .off:
+                break
+            }
+        }
+
+        // Pass 1 — the listing text, on its own. A failure here is remembered rather than thrown:
+        // the photographs may still be able to answer.
+        var textItems: [DiscoveredItem]?
+        var textFailure: Error?
+        if !description.isEmpty {
+            do {
+                textItems = try await textPass(description: description)
+            } catch {
+                textFailure = error
+            }
         }
 
         // No usable photograph: the text pass's answer is the whole valuation.
@@ -156,11 +213,6 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         }
 
         // Pass 2 — the photographs, seeded with pass 1's draft.
-        //
-        // The photographs are read on this machine first: a decoded UPC or a printed model number is
-        // the strongest pricing evidence a pallet photograph can hold, and it is the one thing the
-        // provider's own vision pass is least reliable at (see `LotImageDigest`).
-        let evidence = await LotImageDigest.read(download.images)
         do {
             let items = try await imagePass(
                 description: description,
@@ -193,6 +245,94 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
             }
             throw error
         }
+    }
+
+    /// The thorough path: one request per photograph, then one reconciliation.
+    ///
+    /// - Returns: `.completed` when the readings produced a valuation; `.unavailable` with the reason
+    ///   when they did not, so `value(subject:)` can decide whether the two passes below are still
+    ///   worth paying for.
+    private func photoScanResult(
+        subject: ValuationSubject,
+        description: String,
+        download: LotImageDownload,
+        labels: [LotImageEvidence],
+        evidence: LotImageEvidence
+    ) async -> LotPhotoScan.RunResult<ValuationOutcome> {
+        let result = await LotPhotoScan.run(
+            subject: subject,
+            description: description,
+            images: download.images,
+            labels: labels,
+            plan: photoScan,
+            store: store,
+            read: { [self] request in try await readPhoto(request) },
+            aggregate: { [self] request in try await aggregate(request) },
+            report: report
+        )
+
+        switch result {
+        case .off:
+            return .off
+        case .unavailable(let error):
+            return .unavailable(error)
+        case .completed(let scan):
+            return .completed(
+                ValuationOutcome(
+                    items: scan.items,
+                    imagesAvailable: subject.imageURLs.count,
+                    imagesSent: download.images.count,
+                    imagesSkipped: download.overBudget.count,
+                    modelID: modelID,
+                    // Every photograph read, plus the reconciliation: the number of requests the
+                    // figures rest on, which on this transport is what the concurrency note above is
+                    // about.
+                    passes: scan.requests + 1,
+                    evidence: evidence,
+                    readings: scan.readings,
+                    readingsFromStore: scan.reused,
+                    scanRequests: scan.requests,
+                    reconciliationFailure: scan.aggregationFailure
+                )
+            )
+        }
+    }
+
+    /// Reads **one** photograph: one `/chat/completions` call carrying the single-image question, the
+    /// single-image reader output and the per-photograph schema.
+    func readPhoto(_ request: PhotoReadingRequest) async throws -> PhotoReading {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ValuationError.missingAPIKey
+        }
+        let body = try requestBody(
+            systemInstruction: LotPhotoScanPrompt.readingSystemInstruction,
+            prompt: LotPhotoScanPrompt.userPrompt(request, schemaText: Self.embeddedReadingSchema),
+            images: [request.image]
+        )
+        let answer = try await send(body)
+        guard let choice = answer.choices?.first else {
+            throw ValuationError.malformedResponse("the response contained no choices")
+        }
+        return try LotPhotoScanAnswer.reading(
+            fromAnswerText: Self.answerText(of: answer),
+            finishReason: choice.finishReason,
+            request: request,
+            modelID: modelID
+        )
+    }
+
+    /// Reconciles a lot's readings into its line items, in one request — text-only, plus any
+    /// photographs a ceiling kept out of the per-image path.
+    func aggregate(_ request: PhotoAggregationRequest) async throws -> [DiscoveredItem] {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ValuationError.missingAPIKey
+        }
+        let body = try requestBody(
+            systemInstruction: LotPhotoScanPrompt.aggregationSystemInstruction,
+            prompt: LotPhotoScanPrompt.aggregationPrompt(request, schemaText: Self.embeddedSchema),
+            images: request.leftoverImages
+        )
+        return try decodeItems(from: try await send(body))
     }
 
     /// Cheap first look: a single text-only request for whole-pallet figures, run ahead of the
@@ -294,6 +434,11 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// The pre-price's own rendered schema, kept apart from `embeddedSchema` so neither ask can
     /// start describing the other's shape.
     private static let embeddedPrePriceSchema = LotValuationPrompt.prePriceSchema.jsonSchemaText
+
+    /// The per-photograph reading's rendered schema. Its own constant for the same reason: JSON mode
+    /// wants the shape in the prompt, and the shape of a reading is nothing like the shape of a
+    /// valuation.
+    private static let embeddedReadingSchema = LotPhotoScanPrompt.readingSchema.jsonSchemaText
 }
 
 // MARK: - Request model

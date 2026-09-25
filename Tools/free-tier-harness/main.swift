@@ -195,12 +195,87 @@ var galleryImageSteps: [StubScript.Step] {
     }
 }
 
+/// A `generateContent` success envelope whose text part is `inner`, whatever shape `inner` is.
+///
+/// `successBody` builds the one fixture whose answer is a pallet's line items; a thorough scan asks a
+/// different question per photograph, so its answers are readings (`photoReadingBody`) and the items
+/// only come back at the end.
+func generateContentEnvelope(_ inner: String) -> Data {
+    let escaped = inner.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+    return Data(#"{"candidates":[{"finish_reason":"STOP","content":{"parts":[{"text":"\#(escaped)"}]}}]}"#.utf8)
+}
+
+/// One photograph's answer, in the reading schema the per-photograph prompt asks for: what this frame
+/// showed, with the units visible **in that frame**.
+let photoReadingJSON = #"{"summary":"a stack of sealed cartons","objects":[{"name":"NAME","brand":"Energizer","category":"household","quantity":QUANTITY,"unitRetail":15.99,"unitResale":9.5,"condition":"new","packaging":"sealed retail","location":"front left","identifiers":["039800011324"],"labelText":"Energizer MAX AA","confidence":"High","evidence":"label reads Energizer MAX AA","notes":""}],"notes":""}"#
+
+func readingJSON(name: String, quantity: Int) -> String {
+    photoReadingJSON
+        .replacingOccurrences(of: "NAME", with: name)
+        .replacingOccurrences(of: "QUANTITY", with: "\(quantity)")
+}
+
+func photoReadingBody(name: String, quantity: Int) -> Data {
+    generateContentEnvelope(readingJSON(name: name, quantity: quantity))
+}
+
+/// The same reading in DeepSeek's chat envelope, because the two transports wrap the same JSON
+/// differently and the thorough path has to work through both.
+func deepSeekPhotoReadingBody(name: String, quantity: Int) -> Data {
+    let inner = readingJSON(name: name, quantity: quantity)
+    let escaped = inner.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+    return Data(#"{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"\#(escaped)"}}]}"#.utf8)
+}
+
+/// A two-photograph lot, so a thorough scan can be driven end to end without a four-frame script.
+let twoPhotoSubject = ValuationSubject(
+    lotNumber: "307",
+    title: "Pallet of batteries",
+    rawDescription: "Mixed lot, 20 pieces.",
+    currentBid: 90,
+    imageURLs: [
+        URL(string: "https://cdn.example.test/lot-307-1.jpg")!,
+        URL(string: "https://cdn.example.test/lot-307-2.jpg")!
+    ],
+    detailURL: nil
+)
+
+/// The same shape for the fallback checks, where the store's answer must not be involved: a different
+/// lot number is a different key.
+let onePhotoSubject = ValuationSubject(
+    lotNumber: "308",
+    title: "Pallet of batteries",
+    rawDescription: "Mixed lot, 20 pieces.",
+    currentBid: 90,
+    imageURLs: [URL(string: "https://cdn.example.test/lot-308-1.jpg")!],
+    detailURL: nil
+)
+
+/// A third lot, for the same thorough scan driven through the other transport.
+let deepSeekSubject = ValuationSubject(
+    lotNumber: "309",
+    title: "Pallet of batteries",
+    rawDescription: "Mixed lot, 20 pieces.",
+    currentBid: 90,
+    imageURLs: [URL(string: "https://cdn.example.test/lot-309-1.jpg")!],
+    detailURL: nil
+)
+
+/// A photograph step, as the loader will accept it.
+func photoStep() -> StubScript.Step {
+    StubScript.Step(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"])
+}
+
 func makeService(
     _ script: StubScript,
     requestsPerMinute: Int,
     maxAttempts: Int,
     maxImageBytes: Int = 6_000_000,
-    maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes
+    maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
+    photoScan: PhotoScanPlan = .disabled,
+    store: PhotoReadingStore = .shared
 ) -> GeminiValuationService {
     StubProtocol.script = script
     let configuration = URLSessionConfiguration.ephemeral
@@ -212,7 +287,9 @@ func makeService(
         maxImageBytes: maxImageBytes,
         maxTotalImageBytes: maxTotalImageBytes,
         requestsPerMinute: requestsPerMinute,
-        maxAttempts: maxAttempts
+        maxAttempts: maxAttempts,
+        photoScan: photoScan,
+        store: store
     )
 }
 
@@ -235,7 +312,9 @@ func makeDeepSeekService(
     requestsPerMinute: Int,
     maxAttempts: Int,
     maxImageBytes: Int = 6_000_000,
-    maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes
+    maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
+    photoScan: PhotoScanPlan = .disabled,
+    store: PhotoReadingStore = .shared
 ) -> DeepSeekValuationService {
     StubProtocol.script = script
     let configuration = URLSessionConfiguration.ephemeral
@@ -247,7 +326,9 @@ func makeDeepSeekService(
         maxImageBytes: maxImageBytes,
         maxTotalImageBytes: maxTotalImageBytes,
         requestsPerMinute: requestsPerMinute,
-        maxAttempts: maxAttempts
+        maxAttempts: maxAttempts,
+        photoScan: photoScan,
+        store: store
     )
 }
 
@@ -549,9 +630,9 @@ do {
 do {
     print("11. DeepSeek: pass 1 is text-only, pass 2 carries the photo, the schema and json_object mode")
     let script = StubScript([
-        .init(status: 200, body: deepSeekSuccessBody),                                  // pass 1: text
-        .init(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"]),   // photo
-        .init(status: 200, body: deepSeekSuccessBody)                                   // pass 2: photos
+        .init(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"]), // the photograph
+        .init(status: 200, body: deepSeekSuccessBody),                                // pass 1: text
+        .init(status: 200, body: deepSeekSuccessBody)                                 // pass 2: photos
     ])
     let service = makeDeepSeekService(script, requestsPerMinute: 0, maxAttempts: 1)
     let outcome = try await service.value(subject: imageSubject)
@@ -617,7 +698,10 @@ do {
     let itemObject = items?["items"] as? [String: Any]
     let fields = (itemObject?["properties"] as? [String: Any])?.keys.sorted() ?? []
     check(
-        fields == ["confidence", "evidence", "itemName", "notes", "resaleValue", "retailValue"],
+        fields == [
+            "confidence", "evidence", "itemName", "notes", "photos", "quantity",
+            "resaleValue", "retailValue"
+        ],
         "lists every field DiscoveredItem needs",
         detail: fields.joined(separator: ", ")
     )
@@ -755,7 +839,10 @@ do {
     let itemsNode = (schema?["properties"] as? [String: Any])?["items"] as? [String: Any]
     let itemObject = itemsNode?["items"] as? [String: Any]
     let itemProperties = itemObject?["properties"] as? [String: Any]
-    check(itemProperties?.keys.sorted() == ["confidence", "evidence", "itemName", "notes", "resaleValue", "retailValue"], "schema exposes every field", detail: "\((itemProperties?.keys.sorted() ?? []).joined(separator: ", "))")
+    check(itemProperties?.keys.sorted() == [
+        "confidence", "evidence", "itemName", "notes", "photos", "quantity",
+        "resaleValue", "retailValue"
+    ], "schema exposes every field", detail: "\((itemProperties?.keys.sorted() ?? []).joined(separator: ", "))")
 } catch {
     tally.bump()
     print("  FAIL  unexpected error: \(error)")
@@ -767,8 +854,8 @@ do {
 do {
     print("18. DeepSeek: a failing photograph pass falls back to the text pass's answer")
     let script = StubScript([
-        .init(status: 200, body: deepSeekSuccessBody),
         .init(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: deepSeekSuccessBody),
         .init(status: 500, body: Data(#"{"error":{"message":"server error"}}"#.utf8))
     ])
     let service = makeDeepSeekService(script, requestsPerMinute: 0, maxAttempts: 1)
@@ -1472,12 +1559,13 @@ do {
         print("  FAIL  unexpected error: \(error)")
     }
 
-    // DeepSeek's photograph pass gets the whole gallery too, with its text pass untouched (one chat
-    // request, then the photographs, then the request that carries them).
+    // DeepSeek's photograph pass gets the whole gallery too, with its text pass untouched (the
+    // photographs are downloaded and read first, then the text pass, then the request that carries
+    // them).
     do {
         let script = StubScript(
-            [.init(status: 200, body: deepSeekSuccessBody)]
-                + galleryImageSteps
+            galleryImageSteps
+                + [.init(status: 200, body: deepSeekSuccessBody)]
                 + [.init(status: 200, body: deepSeekSuccessBody)]
         )
         let service = makeDeepSeekService(script, requestsPerMinute: 0, maxAttempts: 1)
@@ -1486,7 +1574,10 @@ do {
         check(outcome.imagesSent == 4, "the whole gallery reached the photograph pass", detail: "\(outcome.imagesSent)")
         check(outcome.imagesAvailable == 4, "counted against the lot's own total", detail: "\(outcome.imagesAvailable)")
         check(outcome.passes == 2, "still appraised in two passes", detail: "\(outcome.passes)")
-        check(imageURLs(in: script.requests.first).isEmpty, "and the text pass still carries no photographs")
+        let firstChat = script.requests.first {
+            $0.url.absoluteString == "https://api.deepseek.com/chat/completions"
+        }
+        check(firstChat.map { imageURLs(in: $0).isEmpty } == true, "and the text pass still carries no photographs")
     } catch {
         tally.bump()
         print("  FAIL  unexpected error: \(error)")
@@ -1713,6 +1804,155 @@ do {
         check(outcome.evidence?.logPhrase.contains("nothing legible") == true,
               "and the console line says so in words",
               detail: outcome.evidence?.logPhrase ?? "nil")
+    } catch {
+        tally.bump()
+        print("  FAIL  unexpected error: \(error)")
+    }
+}
+
+// MARK: - 34. The thorough scan
+
+// The thorough path is the one piece of this app that spends money per *frame*: one request for each
+// photograph, then one more to reconcile the readings into the pallet's line items. Three claims about
+// it are worth pinning down offline, because they are the difference between a scan that is expensive
+// and a scan that is expensive *twice*:
+//
+//   * each photograph is asked about on its own, with the reading's own URL and position;
+//   * the readings are written to this machine before the reconciliation is attempted, so re-scanning
+//     the same lot with the same model costs one request rather than n+1;
+//   * a reconciliation that fails still produces a valuation, from the readings that were paid for.
+do {
+    print("34. A thorough scan reads each photograph on its own, keeps the readings, then reconciles")
+
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("lotlogic-readings-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = PhotoReadingStore(directory: directory)
+    let plan = PhotoScanPlan.thorough(modelID: "gemini-2.5-flash", concurrency: 1)
+
+    // A whole scan, in the shape the pipeline sends it: every photograph, then the reconciliation.
+    do {
+        let script = StubScript([
+            photoStep(),
+            photoStep(),
+            .init(status: 200, body: photoReadingBody(name: "Energizer MAX AA batteries", quantity: 6)),
+            .init(status: 200, body: photoReadingBody(name: "Energizer MAX AA batteries", quantity: 4)),
+            .init(status: 200, body: successBody)
+        ])
+        let service = makeService(script, requestsPerMinute: 0, maxAttempts: 1, photoScan: plan, store: store)
+        let outcome = try await service.value(subject: twoPhotoSubject)
+
+        check(outcome.readings.count == 2, "one reading per photograph", detail: "\(outcome.readings.count)")
+        check(Set(outcome.readings.map(\.imageURL)) == Set(twoPhotoSubject.imageURLs),
+              "each reading names the photograph it came from",
+              detail: outcome.readings.map(\.imageURL.lastPathComponent).joined(separator: ", "))
+        check(outcome.readings.map(\.imageIndex).sorted() == [1, 2],
+              "and its position in the gallery",
+              detail: "\(outcome.readings.map(\.imageIndex).sorted())")
+        check(outcome.readings.allSatisfy { $0.modelID == "gemini-2.5-flash" },
+              "stamped with the model that read it, which is what the store reuses by")
+        check(outcome.scanRequests == 3, "one request per photograph plus the reconciliation", detail: "\(outcome.scanRequests)")
+        check(outcome.readingsFromStore == 0, "and nothing was reused on a first scan", detail: "\(outcome.readingsFromStore)")
+        check(outcome.items.count == 1, "the reconciliation produced the line items", detail: "\(outcome.items.count)")
+        check(outcome.items.first?.itemName == "AA batteries, 12x 2-pack",
+              "from the reconciliation request rather than from the readings",
+              detail: outcome.items.first?.itemName ?? "nil")
+
+        let stored = await store.readings(forLot: "307", modelID: "gemini-2.5-flash")
+        check(stored.count == 2, "the readings are on this machine, before the reconciliation is attempted",
+              detail: "\(stored.count)")
+    } catch {
+        tally.bump()
+        print("  FAIL  unexpected error: \(error)")
+    }
+
+    // The same lot again: the photographs are not paid for twice.
+    //
+    // The gallery itself is fetched again — image bytes are not what the store keeps, and a CDN read
+    // costs nothing — but no *model* request is made about a photograph this machine has already read.
+    do {
+        let script = StubScript([
+            photoStep(),
+            photoStep(),
+            .init(status: 200, body: successBody)
+        ])
+        let service = makeService(script, requestsPerMinute: 0, maxAttempts: 1, photoScan: plan, store: store)
+        let outcome = try await service.value(subject: twoPhotoSubject)
+
+        check(outcome.readingsFromStore == 2, "the second scan reused both readings", detail: "\(outcome.readingsFromStore)")
+        check(outcome.readings.count == 2, "and still reports them", detail: "\(outcome.readings.count)")
+        check(outcome.scanRequests == 1, "so only the reconciliation was sent", detail: "\(outcome.scanRequests)")
+
+        let chats = script.requests.filter { $0.url.absoluteString.contains("generateContent") }
+        check(chats.count == 1, "one model request, not one per photograph", detail: "\(chats.count)")
+        check(chats.allSatisfy { imageURLs(in: $0).isEmpty },
+              "the reconciliation carries no photographs when every frame was read",
+              detail: "\(chats.map { imageURLs(in: $0).count })")
+    } catch {
+        tally.bump()
+        print("  FAIL  unexpected error: \(error)")
+    }
+
+    // The last request is the one that fails: the readings are folded into line items here instead, so
+    // the photographs that were paid for are not thrown away.
+    do {
+        let script = StubScript([
+            photoStep(),
+            .init(status: 200, body: photoReadingBody(name: "Energizer MAX AA batteries", quantity: 6)),
+            .init(status: 500, body: Data(#"{"error":{"message":"server error"}}"#.utf8))
+        ])
+        let service = makeService(script, requestsPerMinute: 0, maxAttempts: 1, photoScan: plan, store: store)
+        let outcome = try await service.value(subject: onePhotoSubject)
+
+        check(outcome.reconciliationFailure != nil,
+              "the reconciliation failure is reported rather than swallowed",
+              detail: outcome.reconciliationFailure ?? "nil")
+        check(outcome.items.count == 1, "the readings became line items anyway", detail: "\(outcome.items.count)")
+        check(outcome.items.first?.itemName.contains("Energizer") == true,
+              "named after what the photograph showed",
+              detail: outcome.items.first?.itemName ?? "nil")
+        check(outcome.items.first?.quantity == 6,
+              "with the units the reading counted",
+              detail: String(describing: outcome.items.first?.quantity))
+    } catch {
+        tally.bump()
+        print("  FAIL  unexpected error: \(error)")
+    }
+
+    // And the identical pipeline on the other transport: DeepSeek builds the per-photograph request and
+    // the reconciliation itself, and gets no say in what happens between them.
+    do {
+        let script = StubScript([
+            photoStep(),
+            .init(status: 200, body: deepSeekPhotoReadingBody(name: "Energizer MAX AA batteries", quantity: 6)),
+            .init(status: 200, body: deepSeekSuccessBody)
+        ])
+        let deepSeekPlan = PhotoScanPlan.thorough(modelID: "deepseek-flash", concurrency: 1)
+        let service = makeDeepSeekService(
+            script,
+            requestsPerMinute: 0,
+            maxAttempts: 1,
+            photoScan: deepSeekPlan,
+            store: store
+        )
+        let outcome = try await service.value(subject: deepSeekSubject)
+
+        check(outcome.readings.count == 1, "a reading came back through DeepSeek too", detail: "\(outcome.readings.count)")
+        check(outcome.readings.first?.modelID == "deepseek-flash",
+              "stamped with the model that read it",
+              detail: outcome.readings.first?.modelID ?? "nil")
+        check(outcome.items.count == 1, "and the reconciliation produced the line items", detail: "\(outcome.items.count)")
+
+        let chats = script.requests.filter { $0.url.absoluteString.contains("chat/completions") }
+        check(chats.count == 2, "two model requests: the photograph, then the reconciliation", detail: "\(chats.count)")
+        check(imageURLs(in: chats.first).count == 1, "the first carries the photograph itself",
+              detail: "\(imageURLs(in: chats.first).count)")
+        check(imageURLs(in: chats.last).isEmpty, "and the reconciliation is text-only",
+              detail: "\(imageURLs(in: chats.last).count)")
+        let reconciliationPrompt = userText(in: chats.last)
+        check(reconciliationPrompt.contains("unitRetail") && reconciliationPrompt.contains("quantity"),
+              "which is handed every reading, field by field",
+              detail: String(reconciliationPrompt.suffix(80)))
     } catch {
         tally.bump()
         print("  FAIL  unexpected error: \(error)")

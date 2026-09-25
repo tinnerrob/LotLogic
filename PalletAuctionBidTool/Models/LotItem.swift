@@ -117,6 +117,22 @@ final class LotItem: Identifiable {
     /// `0` means "never scanned".
     var passesUsed: Int = 0
 
+    /// What the model saw in each photograph, when the scan read the lot photograph by photograph
+    /// (`LotPhotoScan`). Empty for a single-pass appraisal, which is every scan that predates the
+    /// thorough path.
+    ///
+    /// Kept on the row rather than folded into `discoveredItems` because it is *evidence*: a line
+    /// item says what the pallet is worth, a reading says which photograph that came off — and that
+    /// is the claim an operator checking a figure against a picture is actually checking.
+    var readings: [PhotoReading] = []
+
+    /// The step a thorough scan is on right now: `photograph 7 of 12 read: 4 product group(s)`.
+    ///
+    /// Set by the coordinator from the scan's own reports (see `PhotoScanReport.rowNote`) so a row
+    /// being read photograph by photograph says *where* it is instead of sitting on one spinner for
+    /// the whole gallery. Empty for the single-pass path, which has no steps to report.
+    var photoScanNote: String = ""
+
     init(
         id: UUID = UUID(),
         lotNumber: String,
@@ -174,6 +190,12 @@ final class LotItem: Identifiable {
     /// `true` once the row has at least one imaged line item.
     var hasValuation: Bool { !discoveredItems.isEmpty }
 
+    /// `true` once a photograph-by-photograph scan produced readings for this lot.
+    var hasReadings: Bool { !readings.isEmpty }
+
+    /// The readings rolled up for the row and the console (`12 photo(s) · 34 group(s) · 9 id(s)`).
+    var readingSummary: PhotoReadingSummary { readings.photoSummary }
+
     /// `true` once a text-only pre-price has run.
     var isPrePriced: Bool { prePricedAt != nil }
 
@@ -225,12 +247,24 @@ final class LotItem: Identifiable {
     ///
     /// The pre-price is retired here: the scanned numbers replace it outright, so nothing on the
     /// row is left looking provisional once a real valuation exists.
-    func applyValuation(_ items: [DiscoveredItem], imagesAnalyzed: Int, passes: Int = 1) {
+    ///
+    /// `readings` is what a thorough scan saw photograph by photograph; the single-pass path has none
+    /// and passes none, which is why it defaults to empty rather than being required. Either way the
+    /// live scan note is cleared: the scan is done, so the row must not keep saying "photograph 7 of
+    /// 12".
+    func applyValuation(
+        _ items: [DiscoveredItem],
+        imagesAnalyzed: Int,
+        passes: Int = 1,
+        readings: [PhotoReading] = []
+    ) {
         discoveredItems = items
         totalRetail = items.reduce(0) { $0 + $1.retailValue }
         totalResale = items.reduce(0) { $0 + $1.resaleValue }
         self.imagesAnalyzed = imagesAnalyzed
         passesUsed = passes
+        self.readings = readings
+        photoScanNote = ""
         analyzedAt = .now
         analysisState = .completed
         clearPrePrice()
@@ -270,15 +304,25 @@ final class LotItem: Identifiable {
 
     func markAnalyzing() {
         analysisState = .analyzing
+        // The last scan's step note is stale the moment a new scan starts, and a row that opened on
+        // "photograph 12 of 12" would read as finished while its gallery was still being read.
+        photoScanNote = ""
+    }
+
+    /// Records the step a thorough scan is on, so the row says where in the gallery it is.
+    func markPhotoScanStep(_ note: String) {
+        photoScanNote = note
     }
 
     func markFailed(_ message: String) {
         analysisState = .failed(message)
+        photoScanNote = ""
         analyzedAt = .now
     }
 
     func markSkipped(_ reason: String) {
         analysisState = .skipped(reason)
+        photoScanNote = ""
         analyzedAt = .now
     }
 
@@ -289,6 +333,8 @@ final class LotItem: Identifiable {
         totalResale = 0
         imagesAnalyzed = 0
         passesUsed = 0
+        readings = []
+        photoScanNote = ""
         analyzedAt = nil
         analysisState = .pending
         clearPrePrice()

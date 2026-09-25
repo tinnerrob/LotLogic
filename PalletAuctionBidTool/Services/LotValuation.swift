@@ -28,6 +28,13 @@ enum ValuationError: LocalizedError, Equatable {
     case blocked(reason: String)
     case noContent(finishReason: String?)
     case malformedResponse(String)
+    /// Every per-photograph read failed, so a thorough scan had nothing to reconcile. The reason is
+    /// the first failure's own text, which is what the operator needs to see (a quota refusal, a
+    /// key that is wrong, a gallery of images the provider would not accept).
+    case photographReadsFailed(count: Int, reason: String)
+    /// The selected provider has no way to read one photograph on its own, so the thorough scan cannot
+    /// run against it. Only ever raised by the protocol's default implementations.
+    case photoScanUnsupported
 
     var errorDescription: String? {
         switch self {
@@ -49,6 +56,10 @@ enum ValuationError: LocalizedError, Equatable {
             "The model returned no text (finish reason: \(finishReason ?? "unknown"))."
         case .malformedResponse(let detail):
             "The model's answer could not be parsed: \(detail)"
+        case .photographReadsFailed(let count, let reason):
+            "None of the lot's \(count) photograph(s) could be read on its own (\(reason))."
+        case .photoScanUnsupported:
+            "The selected provider cannot read a lot's photographs one at a time."
         }
     }
 
@@ -63,7 +74,33 @@ enum ValuationError: LocalizedError, Equatable {
         case .blocked: "blocked by safety filter"
         case .noContent: "empty model answer"
         case .malformedResponse: "unreadable model answer"
+        case .photographReadsFailed: "no readable photographs"
+        case .photoScanUnsupported: "one-photograph reads unsupported"
         }
+    }
+
+    /// The human text for any error, for the places that only want a description.
+    ///
+    /// A `LocalizedError`'s own `errorDescription` when it has one, and `localizedDescription`
+    /// otherwise, so a `URLError` and a `ValuationError` can be logged in the same sentence.
+    static func describe(_ error: Error) -> String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+}
+
+/// Tells a stopped run from a failed one.
+///
+/// `URLSession` reports a cancelled request as `URLError.cancelled` rather than as
+/// `CancellationError`, so both shapes have to be recognized — and the difference matters out loud:
+/// a lot whose scan was stopped goes back to "not valued" and stays scannable, while one that failed
+/// keeps the reason.
+enum ValuationCancellation {
+
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return true }
+        return false
     }
 }
 
@@ -87,6 +124,20 @@ struct ValuationOutcome: Sendable {
     /// empty-but-present when the photographs were read and had nothing legible on them, which the
     /// console and the row say differently from "no photographs were read".
     var evidence: LotImageEvidence?
+    /// What the model made of each photograph, one entry per frame, when the scan read the lot
+    /// photograph by photograph (`LotPhotoScan`). Empty for a single-pass appraisal, which is every
+    /// scan that predates the thorough path — and the difference is visible: nothing else in this
+    /// value says *which picture* a price was read from.
+    var readings: [PhotoReading] = []
+    /// How many of `readings` came back from this machine's store rather than from a request
+    /// (`PhotoReadingStore`). Reported because one is free and the other is not.
+    var readingsFromStore: Int = 0
+    /// How many requests the thorough scan spent: one per photograph read, plus the reconciliation.
+    /// `0` for the single-pass path, whose one request is not a scan step of its own.
+    var scanRequests: Int = 0
+    /// Why the reconciliation had to be done on this machine, when it did — the readings were folded
+    /// into line items by `PhotoReadingMerge` rather than by the model.
+    var reconciliationFailure: String?
 }
 
 /// Whole-pallet figures guessed from the listing text alone.
@@ -133,6 +184,45 @@ protocol ValuationService: Sendable {
     /// immediately. Implementations must not send images here — the whole point is that it costs a
     /// fraction of a photographed pass.
     func prePrice(subject: ValuationSubject) async throws -> PrePriceEstimate
+
+    /// Reads **one** photograph, on its own.
+    ///
+    /// The thorough path's unit of work (`LotPhotoScan`): a single frame, a single question, and a
+    /// `PhotoReading` of what that frame shows. Splitting a gallery this way is what makes the
+    /// detailed questions possible at all — a prompt that has to describe forty photographs at once
+    /// cannot also report where in the frame each product sat, how it is packed and how many units
+    /// were visible *from that angle*.
+    ///
+    /// Implementations must not aggregate across photographs here: the reconciliation is a separate
+    /// request with its own prompt, and a reading that has already averaged in another frame is
+    /// worthless to it.
+    func readPhoto(_ request: PhotoReadingRequest) async throws -> PhotoReading
+
+    /// Reconciles a lot's per-photograph readings into its line items, in one request.
+    ///
+    /// Receives every reading the scan produced plus any photographs a ceiling kept out of the
+    /// per-image path, and returns the same shape a single-pass appraisal returns
+    /// (`LotValuationPrompt.itemsSchema`), so nothing downstream can tell the two apart.
+    func aggregate(_ request: PhotoAggregationRequest) async throws -> [DiscoveredItem]
+}
+
+extension ValuationService {
+
+    /// Default: this provider cannot read photographs one at a time.
+    ///
+    /// A default implementation rather than two more requirements, so a provider that only ever does
+    /// single-pass appraisals — a fixture in a check, a future text-only back end — still conforms, and
+    /// the failure is a real error rather than a silent downgrade. `value(subject:)` is what decides
+    /// whether the thorough path runs at all, so this is only reachable if a provider claims to support
+    /// it and does not.
+    func readPhoto(_ request: PhotoReadingRequest) async throws -> PhotoReading {
+        throw ValuationError.photoScanUnsupported
+    }
+
+    /// Default: this provider cannot reconcile readings.
+    func aggregate(_ request: PhotoAggregationRequest) async throws -> [DiscoveredItem] {
+        throw ValuationError.photoScanUnsupported
+    }
 }
 
 // MARK: - Pacing
@@ -444,6 +534,11 @@ struct ValuationPayload: Codable {
         var notes: String?
         /// What the numbers rest on, quoted off the photographs (see `DiscoveredItem.evidence`).
         var evidence: String?
+        /// Units of the product in the pallet, when the answer said (see `DiscoveredItem.quantity`).
+        var quantity: Double?
+        /// Photographs the line was read from (see `DiscoveredItem.photos`). Only a thorough scan's
+        /// reconciliation can fill this.
+        var photos: [Int]?
     }
 
     var items: [Item]?
@@ -458,7 +553,9 @@ struct ValuationPayload: Codable {
                     retailValue: item.retailValue,
                     resaleValue: item.resaleValue,
                     notes: item.notes,
-                    evidence: item.evidence
+                    evidence: item.evidence,
+                    quantity: Double(item.quantity),
+                    photos: item.photos.isEmpty ? nil : item.photos
                 )
             }
         )
@@ -515,7 +612,14 @@ enum LotValuationAnswer {
                     retailValue: max(0, item.retailValue ?? 0),
                     resaleValue: max(0, item.resaleValue ?? 0),
                     notes: (item.notes ?? "").condensedWhitespace,
-                    evidence: (item.evidence ?? "").condensedWhitespace
+                    evidence: (item.evidence ?? "").condensedWhitespace,
+                    quantity: LotPhotoScanAnswer.quantity(from: item.quantity),
+                    photos: (item.photos ?? [])
+                        .filter { $0 > 0 }
+                        .reduce(into: [Int]()) { positions, position in
+                            if !positions.contains(position) { positions.append(position) }
+                        }
+                        .sorted()
                 )
             }
             .filter { !$0.itemName.isEmpty }
@@ -577,7 +681,11 @@ enum LotValuationPrompt {
 
     /// Pricing and formatting rules every pass shares, so the text pass and the photograph pass
     /// cannot drift apart.
-    private static let valuationRules = """
+    ///
+    /// Numbered from 3 on purpose: every instruction that interpolates them supplies rules 1 and 2 of
+    /// its own (what to look at, how to group it), and the numbering is what keeps a prompt's rules
+    /// reading as one list. `LotPhotoScanPrompt` uses the same block for the reconciliation pass.
+    static let valuationRules = """
     3. `retailValue` is the item's normal in-store price when new. `resaleValue` is what a \
     reseller could realistically get for it (typically 40-70% of retail for liquidation \
     merchandise, less for opened, damaged or untested goods).
@@ -803,7 +911,8 @@ enum LotValuationPrompt {
     ///
     /// DeepSeek's `json_object` mode requires the word *json* **and** a format example to be
     /// present in the prompt, which is why the schema is inlined rather than sent out of band.
-    private static func outputContractLines(schemaText: String?) -> [String] {
+    /// Internal rather than private because `LotPhotoScanPrompt`'s two asks need the same contract.
+    static func outputContractLines(schemaText: String?) -> [String] {
         guard let schemaText else {
             return ["Respond only with JSON matching the provided schema."]
         }
@@ -836,6 +945,22 @@ enum LotValuationPrompt {
                                 ),
                                 ("retailValue", .number(description: "Total in-store retail value of the group, in USD.")),
                                 ("resaleValue", .number(description: "Total realistic resale value of the group, in USD.")),
+                                (
+                                    "quantity",
+                                    .number(
+                                        description: "Units of this product the lot holds. Optional: 0 when the "
+                                            + "listing or the readings do not support a count."
+                                    )
+                                ),
+                                (
+                                    "photos",
+                                    .array(
+                                        description: "1-based numbers of the photographs this line was read from. "
+                                            + "Empty for an appraisal that did not read the lot photograph by "
+                                            + "photograph.",
+                                        items: .number(description: "Gallery position of one photograph.")
+                                    )
+                                ),
                                 ("notes", .string(description: "One short sentence explaining the estimate.")),
                                 (
                                     "evidence",

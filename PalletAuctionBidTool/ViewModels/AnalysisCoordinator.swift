@@ -134,22 +134,92 @@ final class AnalysisCoordinator {
     private var scraper: AuctionScraperService?
 
     /// Injectable for tests; defaults to the client for whichever provider is selected.
-    var makeValuationService: @MainActor (AppSettings) -> ValuationService = { settings in
+    ///
+    /// The report closure is a parameter rather than something read off `self`: a `ValuationService` is
+    /// a `Sendable` value that may be called from any task, and a thorough scan reports each photograph
+    /// from whichever task is doing the work (see `LotPhotoScan`). Passing it in is also what lets the
+    /// default below decide *once* whether the photograph-by-photograph path is wanted at all —
+    /// `AppSettings.photoScanPlan()` is the operator's answer to that.
+    var makeValuationService: @MainActor (
+        AppSettings,
+        @escaping @Sendable (PhotoScanReport) -> Void
+    ) -> ValuationService = { settings, report in
+        AnalysisCoordinator.liveService(for: settings, report: report)
+    }
+
+    /// The client for the selected provider, with the thorough-scan plan and the reporter wired in.
+    private static func liveService(
+        for settings: AppSettings,
+        report: @escaping @Sendable (PhotoScanReport) -> Void
+    ) -> ValuationService {
+        let plan = settings.photoScanPlan()
         switch settings.provider {
         case .gemini:
-            GeminiValuationService(
+            return GeminiValuationService(
                 apiKey: settings.apiKey,
                 modelID: settings.activeModelID,
-                requestsPerMinute: settings.requestsPerMinute
+                requestsPerMinute: settings.requestsPerMinute,
+                photoScan: plan,
+                report: report
             )
         case .deepSeek:
-            DeepSeekValuationService(
+            return DeepSeekValuationService(
                 apiKey: settings.deepSeekAPIKey,
                 modelID: settings.activeModelID,
-                requestsPerMinute: settings.requestsPerMinute
+                requestsPerMinute: settings.requestsPerMinute,
+                photoScan: plan,
+                report: report
             )
         }
     }
+
+    /// The reporter a scan is built with: every step goes to the console, and the row being read says
+    /// where in its gallery it is.
+    ///
+    /// The closure is handed to a `Sendable` service that calls it from whichever task is doing the
+    /// work, so it hops back to the main actor to touch `logLines` and the row. Batches scan several
+    /// lots at once, so a step from another lot's scan can land between two of this one's — which is
+    /// also true of the finished valuations themselves; the lot number on every line is what keeps the
+    /// console readable through it.
+    private func scanReporter(for lot: LotItem) -> @Sendable (PhotoScanReport) -> Void {
+        { [weak self, weak lot] report in
+            Task { @MainActor in
+                guard let self, let lot else { return }
+                self.record(report, on: lot)
+            }
+        }
+    }
+
+    /// One scan step: a console line, and the live note on the row.
+    ///
+    /// The note is written only while the row is still being read. A report is delivered from another
+    /// task, so one can land after the scan has already finished — and a completed row wearing
+    /// `photograph 12 of 12` would read as a scan that never ended.
+    private func record(_ report: PhotoScanReport, on lot: LotItem) {
+        log(report.logLine, source: .valuation)
+        guard case .analyzing = lot.analysisState else { return }
+        lot.markPhotoScanStep(report.rowNote)
+    }
+
+    /// The reporter a batch scan is built with.
+    ///
+    /// One service serves every lot in a batch, so the step cannot be captured per row the way
+    /// `scanReporter(for:)` does it: it is routed by the lot number the report carries.
+    private func batchScanReporter() -> @Sendable (PhotoScanReport) -> Void {
+        { [weak self] report in
+            Task { @MainActor in
+                guard let self else { return }
+                guard let lot = self.lots.first(where: { $0.lotNumber == report.lotNumber }) else {
+                    // The row went away mid-batch — a re-scrape or **Clear** replaced it. The console
+                    // line still happened, and there is no row left to write the note onto.
+                    self.log(report.logLine, source: .valuation)
+                    return
+                }
+                self.record(report, on: lot)
+            }
+        }
+    }
+
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -586,7 +656,7 @@ final class AnalysisCoordinator {
         settings.persist()
         scansWereStopped = false
 
-        let service = makeValuationService(settings)
+        let service = makeValuationService(settings, scanReporter(for: lot))
         let card = lot.valuationSubject
 
         lot.markAnalyzing()
@@ -594,7 +664,7 @@ final class AnalysisCoordinator {
         statusText = "Appraising lot \(lot.lotNumber) with \(settings.activeModelID)"
         log(
             "Scanning lot \(lot.lotNumber) — \(settings.provider.displayName) "
-                + "\(settings.activeModelID), every image on its lot page"
+                + "\(settings.activeModelID), \(settings.photoScanSummary) on its lot page"
         )
 
         scanTasks[lot.id] = Task { [weak self] in
@@ -683,7 +753,7 @@ final class AnalysisCoordinator {
         settings.persist()
         scansWereStopped = false
 
-        let service = makeValuationService(settings)
+        let service = makeValuationService(settings, { _ in })
         let subject = lot.valuationSubject
 
         lot.markPrePricing()
@@ -731,7 +801,7 @@ final class AnalysisCoordinator {
                 + pacingSuffix(for: settings)
         )
 
-        let service = makeValuationService(settings)
+        let service = makeValuationService(settings, { _ in })
         let concurrency = AppSettings.batchConcurrency
         prePriceBatchTask = Task { [weak self] in
             await self?.prePrice(targets, using: service, concurrency: concurrency, automatic: false)
@@ -846,11 +916,11 @@ final class AnalysisCoordinator {
         statusText = "Appraising \(targets.count) lot(s) with \(settings.activeModelID)"
         log(
             "Scanning \(targets.count) unvalued lot(s) with \(settings.provider.displayName) "
-                + "\(settings.activeModelID), every image on each lot page, "
+                + "\(settings.activeModelID), \(settings.photoScanSummary) on each lot page, "
                 + "\(AppSettings.batchConcurrency) at a time\(pacingSuffix(for: settings))"
         )
 
-        let service = makeValuationService(settings)
+        let service = makeValuationService(settings, batchScanReporter())
         let concurrency = AppSettings.batchConcurrency
         scanBatchTask = Task { [weak self] in
             await self?.valuate(targets, using: service, concurrency: concurrency)
@@ -1043,7 +1113,12 @@ final class AnalysisCoordinator {
 
     /// Records a successful appraisal on its row and in the console.
     private func apply(_ outcome: ValuationOutcome, to lot: LotItem) {
-        lot.applyValuation(outcome.items, imagesAnalyzed: outcome.imagesSent, passes: outcome.passes)
+        lot.applyValuation(
+            outcome.items,
+            imagesAnalyzed: outcome.imagesSent,
+            passes: outcome.passes,
+            readings: outcome.readings
+        )
         valuedCount += 1
         // What the app's own reader made of the photographs travels with the figures rather than
         // staying in the prompt: it is the literal answer to "what is this price based on?", and it is
@@ -1051,6 +1126,26 @@ final class AnalysisCoordinator {
         // another request. Printed before the summary so the summary closes the lot's block.
         if let evidence = outcome.evidence {
             log("Lot \(lot.lotNumber): label reader read \(evidence.logPhrase)", source: .valuation)
+        }
+        // The thorough path's own accounting: how many photographs were read one at a time, how many
+        // of those were free because this machine already knew them, and — when the last request was
+        // the one that failed — that the line items were reconciled here instead.
+        if !outcome.readings.isEmpty {
+            let summary = outcome.readings.photoSummary
+            log("Lot \(lot.lotNumber): \(summary.logPhrase)", source: .valuation)
+            if outcome.readingsFromStore > 0 {
+                log(
+                    "Lot \(lot.lotNumber): \(outcome.readingsFromStore) reading(s) reused from this "
+                        + "machine, \(outcome.scanRequests) request(s) sent",
+                    source: .valuation
+                )
+            }
+            if let reason = outcome.reconciliationFailure {
+                log(
+                    "Lot \(lot.lotNumber): reconciled on this machine — \(reason)",
+                    source: .valuation
+                )
+            }
         }
         log(
             "Lot \(lot.lotNumber): \(outcome.items.count) item(s) — retail "
