@@ -43,7 +43,7 @@ final class AppSettings {
 
     /// How many lots a batch appraises at the same time.
     ///
-    /// This was **Parallel lots**, a stepper in Run tuning, and the question it drew ("what is a
+    /// This was **Parallel lots**, a stepper in Run Tuning, and the question it drew ("what is a
     /// parallel lot?") was the fair one: it is the width of the **Price all** / **Eval all** task
     /// group, not a property of a lot, and it says nothing about a scrape — one page is still fetched
     /// at a time, never in parallel against the auction host. Three hides a slow model behind its
@@ -354,7 +354,7 @@ final class AppSettings {
     ///
     /// Nested inside `persist()` rather than duplicated, so there is still exactly one place that
     /// knows the stored shape — and callable by itself from a toggle in the table's gear, which needs
-    /// to write *now* without also committing whatever is half-typed in Run tuning.
+    /// to write *now* without also committing whatever is half-typed in Run Tuning.
     private func persistColumnVisibility() {
         defaults.set(columnVisibility.storedNames, forKey: Key.hiddenColumns)
     }

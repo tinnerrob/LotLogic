@@ -67,8 +67,9 @@ struct LogConsoleView: View {
     }
 
     /// Doubles as the collapse control. Folded, it carries the newest line so the console still says
-    /// *something* — the console's own answer to the question a folded panel asks, which **Run
-    /// tuning** now answers the other way (see `CollapsibleSection`).
+    /// *something* — the console's own answer to the question a folded panel asks. It is now the only
+    /// folding surface in the window: **Run Tuning**, which used to be the other one, is a sheet
+    /// behind the titlebar's Tuning button.
     private var header: some View {
         Button {
             withAnimation(.snappy(duration: 0.18)) { isExpanded.toggle() }

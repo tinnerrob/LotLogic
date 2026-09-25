@@ -76,6 +76,13 @@ final class AnalysisCoordinator {
 
     /// Pages fully extracted so far (1-based count).
     private(set) var pagesExtracted = 0
+
+    /// Rows of the page currently being read that have landed on the board, and how many cards that page
+    /// reported. Both are cleared when the next page starts, and they are what the walk's bar counts
+    /// *within* a page: a **1 page** run creeps as the board fills rather than standing still until the
+    /// walk is over (see `PageWalkProgress.fraction`).
+    private(set) var pageRowsLanded = 0
+    private(set) var pageRowsOnPage = 0
     /// Page budget for the current/last run: a count, or `ScrapeLimits.maximumPages` when the
     /// operator asked for **All pages**.
     private(set) var pageLimit = 1
@@ -132,6 +139,28 @@ final class AnalysisCoordinator {
     /// Set when **Stop** cancelled a scan, so the closing status line says "stopped" rather than
     /// "finished".
     private var scansWereStopped = false
+
+    /// The appraisal the operator last asked for: the rows it covers and which button started it.
+    ///
+    /// Kept when a job ends rather than cleared with it, so a row's **Price** keeps naming its row
+    /// (`Pricing Lot #19002`) instead of falling back to the board's count the moment its one row is
+    /// done.
+    /// Cleared when the rows themselves go — **Clear**, **Run** and **Reset valuations** — because a
+    /// job about rows that no longer exist has nothing left to report.
+    private var appraisalJob: AppraisalJob?
+
+    /// The row the appraisal is on right now, and the step inside it — what the modal's detail line and
+    /// its money readout speak for.
+    ///
+    /// The row outlives the step it names on purpose: a row's figures land as its last step ends, and a
+    /// money line that emptied itself the instant the answer arrived would hide the very number the
+    /// operator was waiting for. `inHandStep` is therefore cleared the moment there is no step in
+    /// progress, while the row stays until something else takes the readout over — the next row clicked,
+    /// **Clear**, or a fresh run.
+    private(set) var inHandLotID: UUID?
+
+    /// The step the row in hand is on; `nil` between steps and once that row is done.
+    private(set) var inHandStep: AppraisalStep?
 
     private var seenLotKeys = Set<String>()
     private let logLimit = 400
@@ -201,13 +230,17 @@ final class AnalysisCoordinator {
         }
     }
 
-    /// One scan step: a console line, and the live note on the row.
+    /// One scan step: a console line, the live note on the row, and the readout's own step.
     ///
     /// The note is written only while the row is still being read. A report is delivered from another
     /// task, so one can land after the scan has already finished — and a completed row wearing
-    /// `photograph 12 of 12` would read as a scan that never ended.
+    /// `photograph 12 of 12` would read as a scan that never ended. The readout's step is taken from the
+    /// report either way: it is what says which row the modal's money line is speaking for.
     private func record(_ report: PhotoScanReport, on lot: LotItem) {
         log(report.logLine, source: .valuation)
+        // The report names a step to *start* or one that has just landed; `nil` means it closed
+        // something out (a reconciliation that landed), which leaves the readout where it was.
+        if let step = AppraisalStep(report.event) { note(step, on: lot) }
         guard case .analyzing = lot.analysisState else { return }
         lot.markPhotoScanStep(report.rowNote)
     }
@@ -303,8 +336,9 @@ final class AnalysisCoordinator {
     ///
     /// The bar measures the work in hand against its own total instead of reserving a fixed share for
     /// scraping, so 100% always means "what was asked for is done": while the walk is running it is
-    /// pages read out of the pages this run was told to read, and once lots are being appraised it is
-    /// lots answered out of lots on the board. A three-page run therefore fills 1/3, 2/3, full as it
+    /// pages read out of the pages this run is going to read, and once things are being appraised it is
+    /// the rows of *that* appraisal — the single lot a row's **Price** clicked, or the pending board an
+    /// **Eval all** covers (see `appraisalJob`). A three-page run therefore fills 1/3, 2/3, full as it
     /// walks instead of stopping a third of the way along — which is what the old fixed 35% split
     /// looked like on a run that had actually finished.
     ///
@@ -332,16 +366,29 @@ final class AnalysisCoordinator {
         }
     }
 
-    /// What this run will read, in pages: the operator's **Pages** budget, or — when they asked for
-    /// **All pages** — the listing's own count once its pagination has reported one.
+    /// What this run will read, in pages — the denominator of the walk's readout and its bar.
+    ///
+    /// The rule itself lives in `PageWalkProgress.target`, with its own checks in the offline harness:
+    /// "1 page" in **Run Tuning** against a site whose pager advertises four is a one-page job, and the
+    /// pill has to say `page 1 of 1` rather than promise the three pages nobody is going to read. `nil`
+    /// is an **All pages** walk of a listing that has not reported a count yet.
     private var pageTarget: Int? {
-        settings.walksEveryPage ? listingPageCount : max(1, pageLimit)
+        PageWalkProgress.target(
+            budget: pageLimit,
+            walksEveryPage: settings.walksEveryPage,
+            listingPages: listingPageCount
+        )
     }
 
-    /// Pages read, out of the pages this run intends to read. `nil` while that total is unknown.
+    /// Pages read, out of the pages this run intends to read, plus the share of the page being read whose
+    /// cards have landed. `nil` while that total is unknown.
     private var scrapeProgress: Double? {
-        guard let target = pageTarget, target > 0 else { return nil }
-        return min(1, Double(pagesExtracted) / Double(target))
+        PageWalkProgress.fraction(
+            pagesRead: pagesExtracted,
+            pageRowsLanded: pageRowsLanded,
+            pageRowsOnPage: pageRowsOnPage,
+            target: pageTarget
+        )
     }
 
     /// `true` once an appraisal of any kind has been asked for — a row, a batch, or a whole-board
@@ -357,20 +404,161 @@ final class AnalysisCoordinator {
         lots.count { $0.analysisState.isTerminal || $0.isPrePriced }
     }
 
-    private var appraisalProgress: Double {
-        guard !lots.isEmpty else { return 1 }
-        return min(1, Double(answeredCount) / Double(lots.count))
+    /// Records what an appraisal covers, which is what the pill and the bar count against.
+    ///
+    /// A row's button joins a row-sized job of the same kind already in hand: several rows may be
+    /// clicked through at once (`canScan` allows it), and a second click would otherwise re-point the
+    /// readout at itself while the first was still running — two rows at work, `1 of 1` claimed. A
+    /// batch always replaces what was there: it is exclusive with the row buttons, and its own scope is
+    /// the pending set it was built from.
+    private func beginAppraisal(kind: AppraisalJob.Kind, lotIDs: [UUID], isBatch: Bool) {
+        if !isBatch, let job = appraisalJob, !job.isBatch, job.kind == kind {
+            var joined = job
+            lotIDs.forEach { joined.include($0) }
+            appraisalJob = joined
+            return
+        }
+        appraisalJob = AppraisalJob(kind: kind, lotIDs: lotIDs, isBatch: isBatch)
     }
+
+    /// How many of a job's rows the appraiser has answered.
+    ///
+    /// A **Price** is answered once its row is terminal, and `LotItem.markAnalyzing` clears that state
+    /// as the request starts — so a re-price of a row that already carried figures counts its own work
+    /// rather than reading as done the moment it began. An **Eval** is answered once the cheap pass has
+    /// stopped, which is the only mark a text-only request leaves: `markPrePricing` goes on before the
+    /// request and comes off when it lands *or* fails, so a failure closes its row instead of pinning
+    /// the bar short of full on a job that is over.
+    private func answeredRows(in job: AppraisalJob) -> Int {
+        job.lotIDs.count { id in
+            guard let lot = lots.first(where: { $0.id == id }) else { return false }
+            switch job.kind {
+            case .price: return lot.analysisState.isTerminal
+            case .eval: return !lot.isPrePricing
+            }
+        }
+    }
+
+    /// The row the modal's detail line and money readout speak for, when one is in hand.
+    var inHandLot: LotItem? {
+        guard let inHandLotID else { return nil }
+        return lots.first { $0.id == inHandLotID }
+    }
+
+    /// The row in hand's own figures — open bid, retail, resale, profit — as the modal's bottom line
+    /// prints them, or `nil` when no row is in hand.
+    ///
+    /// The row's *display* figures, which is the same pair the table's money columns print: its valuation
+    /// when it has one and its text-only eval until then. That is what makes the line move during an
+    /// **Eval** run, where nothing has been valued yet and the board's own totals are all zero.
+    var inHandMoney: LotMoney? {
+        guard let lot = inHandLot else { return nil }
+        return LotMoney(
+            currentBid: lot.currentBid,
+            retail: lot.displayRetail,
+            resale: lot.displayResale,
+            provisional: !lot.hasValuation && lot.isPrePriced
+        )
+    }
+
+    /// The step the row in hand is on, in the words the modal prints: `Lot 19002 — photograph 5 of 12`.
+    var progressStep: String? {
+        guard let lot = inHandLot, let step = inHandStep else { return nil }
+        return "Lot \(lot.lotNumber) — \(step.phrase)"
+    }
+
+    /// Records that the appraiser is on `step` in `lot`, which is what the readout points itself at.
+    private func note(_ step: AppraisalStep, on lot: LotItem) {
+        inHandLotID = lot.id
+        inHandStep = step
+    }
+
+    /// Points the readout at a row that has no step yet — what a row's button does the moment it is
+    /// pressed, so the modal's money line is about the row the operator asked for before the first
+    /// request has even gone out.
+    private func pointReadout(at lot: LotItem) {
+        inHandLotID = lot.id
+        inHandStep = nil
+    }
+
+    /// Notes that the row in hand has finished the step it was on, without forgetting the row itself:
+    /// see `inHandLotID`.
+    private func finishStep(for lot: LotItem) {
+        guard inHandLotID == lot.id else { return }
+        inHandStep = nil
+    }
+
+    /// Drops the readout's row and step — the rows they name are going away.
+    private func resetInHandRow() {
+        inHandLotID = nil
+        inHandStep = nil
+    }
+
+    /// The job in hand as the pill prints it: `Evaluating Lot #19002`, `Pricing Lot #3 of 12`.
+    private func appraisalText(_ job: AppraisalJob) -> String {
+        job.text(
+            AppraisalJob.Position(
+                lotNumber: inHandLot?.lotNumber,
+                index: job.position(of: inHandLotID),
+                answered: answeredRows(in: job)
+            )
+        )
+    }
+
+    /// The line under the counters while rows are being appraised: the job in hand, then the board's
+    /// own tally.
+    ///
+    /// The pill names the job; this adds what the pill cannot say — how the board stands after it. The
+    /// two are genuinely different numbers for a single row (`Pricing Lot #19002` *and* `1 ok, 0 failed`
+    /// out of a hundred rows), so both are printed rather than one standing in for the other.
+    private func appraisalTally() -> String {
+        let board = "\(valuedCount) ok, \(failedCount) failed"
+        guard let job = appraisalJob else { return "Valued \(terminalCount) of \(lots.count) — \(board)" }
+        return "\(appraisalText(job)) — \(board)"
+    }
+
+    /// What the bar fills against while things are being appraised: the job's own rows when one is in
+    /// hand, and the board otherwise.
+    ///
+    /// The row in hand contributes its current step's share, so the bar creeps through a photographed
+    /// appraisal — one tick per photograph — instead of standing still for the two minutes a dozen
+    /// requests take. A step's share is always short of 1, so a row only ever counts as a whole row once
+    /// it has actually been answered.
+    private var appraisalProgress: Double {
+        if let job = appraisalJob, job.count > 0 {
+            let answered = Double(answeredRows(in: job)) + inHandShare(in: job)
+            return min(1, answered / Double(job.count))
+        }
+        guard !lots.isEmpty else { return 1 }
+        return min(1, (Double(answeredCount) + stepShare) / Double(lots.count))
+    }
+
+    /// How much of the row in hand's own share counts, when that row belongs to `job` — or the raw share
+    /// when the readout is speaking for the board.
+    private func inHandShare(in job: AppraisalJob) -> Double {
+        guard let id = inHandLotID, job.lotIDs.contains(id) else { return 0 }
+        return stepShare
+    }
+
+    /// The current step's share of its row, or `0` when nothing is mid-step.
+    private var stepShare: Double { inHandStep?.share ?? 0 }
 
     var progressLabel: String {
         switch phase {
         case .scraping:
-            return "Scraping — \(scrapedPageText(max(pagesExtracted, 1)))"
+            // The rows count, not just the pages: a page is one request but many lots, and the number
+            // that moves as the board fills is what says the walk is getting somewhere.
+            let page = scrapedPageText(max(pagesExtracted, 1))
+            return lots.isEmpty ? "Scraping — \(page)" : "Scraping — \(page) · \(lots.count) lot(s)"
         case .idle:
             return "Waiting to start"
         case .valuing:
+            if let job = appraisalJob { return appraisalText(job) }
             return lots.isEmpty ? phase.label : "Valued \(terminalCount) of \(lots.count)"
         case .finished, .stopped, .failed:
+            // A job that has been asked for says what became of it, whatever phase closed it out:
+            // "Pricing Lot #19002" is the answer to a row's button, and the board's count is not.
+            if let job = appraisalJob { return appraisalText(job) }
             guard !lots.isEmpty else { return phase.label }
             return terminalCount == 0
                 ? "Loaded \(lots.count) lot(s) — nothing scanned"
@@ -378,13 +566,12 @@ final class AnalysisCoordinator {
         }
     }
 
-    /// Where a scrape is, in the most specific form known: the listing's own count when it reported
-    /// one ("page 2 of 24"), the operator's budget otherwise ("page 2 of 3"), and **All pages** with
-    /// no count as just that — "page 2 — all pages", because there is no number to print yet and a
-    /// made-up 100 would read as a promise.
+    /// Where a scrape is, in the most specific form known: pages read out of the pages this run is
+    /// going to read (`pageTarget` — the operator's **Pages** budget, capped by the listing's own
+    /// count when it has reported one), and **All pages** with no count as just that — "page 2 — all
+    /// pages", because there is no number to print yet and a made-up 100 would read as a promise.
     private func scrapedPageText(_ page: Int) -> String {
-        if let listingPageCount { return "page \(page) of \(listingPageCount)" }
-        return settings.walksEveryPage ? "page \(page) — all pages" : "page \(page) of \(pageLimit)"
+        PageWalkProgress.text(page: page, target: pageTarget)
     }
 
     var totalCurrentBid: Double { lots.reduce(0) { $0 + $1.currentBid } }
@@ -478,6 +665,11 @@ final class AnalysisCoordinator {
         valuedCount = 0
         failedCount = 0
         skippedCount = 0
+        // The rows are still here but the figures the job reported are not, so the readout goes back
+        // to "waiting" rather than closing out a job whose answers have been thrown away — and the money
+        // line stops speaking for a row whose figures it just dropped.
+        appraisalJob = nil
+        resetInHandRow()
         phase = .idle
         statusText = "Valuations cleared."
     }
@@ -486,7 +678,11 @@ final class AnalysisCoordinator {
         lots.removeAll()
         seenLotKeys.removeAll()
         lotPageSubjects.removeAll()
+        appraisalJob = nil
+        resetInHandRow()
         pagesExtracted = 0
+        pageRowsLanded = 0
+        pageRowsOnPage = 0
         valuedCount = 0
         failedCount = 0
         skippedCount = 0
@@ -614,24 +810,36 @@ final class AnalysisCoordinator {
 
         case .pageStarted(let page, let limit, let lotsSoFar):
             pageLimit = limit
+            // A new page's own rows start from nothing: the bar counts the page it is reading.
+            pageRowsLanded = 0
+            pageRowsOnPage = 0
             statusText = "Scanning \(scrapedPageText(page))"
             log("Page \(page) started — \(lotsSoFar) lot(s) known", source: .scraper)
 
-        case .pageExtracted(let page, let lots, let runningTotal):
+        case .lotExtracted(let page, let index, let of, let lot):
+            // One row, as it lands. The page's cards come back in a single payload, so what this counts
+            // is the app's own insertion of them — one row, one update — which is what the pill's lot
+            // count, the bar and the table all move on.
+            pageRowsLanded = index
+            pageRowsOnPage = of
+            guard seenLotKeys.insert(lot.dedupeKey).inserted else { break }
+            self.lots.append(LotItem(scraped: lot))
+            statusText = of > 1
+                ? "Page \(page) — card \(index) of \(of) on it, \(lots.count) lot(s) on the board"
+                : "Page \(page) — \(lots.count) lot(s) on the board"
+
+        case .pageExtracted(let page, let cards, let newLots, let linked, let runningTotal):
             pagesExtracted = max(pagesExtracted, page)
-            var added = 0
-            for lot in lots where seenLotKeys.insert(lot.dedupeKey).inserted {
-                self.lots.append(LotItem(scraped: lot))
-                added += 1
-            }
+            // The page is read: its own share gives way to the page count itself.
+            pageRowsLanded = 0
+            pageRowsOnPage = 0
             statusText = "Page \(page) — \(self.lots.count) lot(s) on the board"
-            // Which rows can offer **Open** is decided on this page, and the only place that says so
-            // is here: a card whose markup carries no address that names the lot leaves the third
-            // button off, so the count is worth printing rather than looking like a missing control.
-            let linked = lots.filter { $0.detailURLString != nil }.count
+            // Which rows can offer **Open** is decided on the page, and the count is worth printing
+            // rather than looking like a missing control: a card whose markup carries no address that
+            // names the lot leaves that row's third button off.
             log(
-                "Page \(page) extracted: +\(added) row(s) (\(runningTotal) unique reported); "
-                    + "\(linked)/\(lots.count) with a lot-page address",
+                "Page \(page) extracted: +\(newLots) row(s) (\(runningTotal) unique reported); "
+                    + "\(linked)/\(cards) with a lot-page address",
                 source: .scraper
             )
 
@@ -694,6 +902,11 @@ final class AnalysisCoordinator {
         lotPageSubjects[lot.id] = nil
 
         lot.markAnalyzing()
+        // The job in hand is this one row — or one more row onto the same job, if another **Price**
+        // is still running. The readout points at it before anything is requested, so its own figures
+        // are on the modal's money line from the first click.
+        pointReadout(at: lot)
+        beginAppraisal(kind: .price, lotIDs: [lot.id], isBatch: false)
         phase = .valuing
         statusText = "Appraising lot \(lot.lotNumber) with \(settings.activeModelID)"
         log(
@@ -750,6 +963,9 @@ final class AnalysisCoordinator {
             return card
         }
 
+        // What the readout says is happening: the row's own page is being read, which is the first step
+        // of both passes — the gallery and the description come off the one GET.
+        note(.readingPage, on: lot)
         do {
             let report = try await scraper.lotPageImages(for: detailURL)
             guard report.ok else {
@@ -819,6 +1035,10 @@ final class AnalysisCoordinator {
         lotPageSubjects[lot.id] = nil
 
         lot.markPrePricing()
+        // One row's **Eval**: the readout counts this row, not the board it sits on — and points at it
+        // straight away, so the modal's money line is about the lot the operator just clicked.
+        pointReadout(at: lot)
+        beginAppraisal(kind: .eval, lotIDs: [lot.id], isBatch: false)
         phase = .valuing
         statusText = "Evaluating lot \(lot.lotNumber) from its listing text"
         log(
@@ -830,6 +1050,8 @@ final class AnalysisCoordinator {
             // The lot's page is read for its description too: a text-only estimate is only worth
             // anything if it is built from the listing's real copy rather than the card's teaser.
             let subject = await self?.subjectForLotPage(lot) ?? card
+            // The page is read; the model is what is being waited on now.
+            self?.note(.evaluatingText, on: lot)
             let result: Result<PrePriceEstimate, Error>
             do {
                 result = .success(try await service.prePrice(subject: subject))
@@ -858,6 +1080,10 @@ final class AnalysisCoordinator {
 
         settings.persist()
         scansWereStopped = false
+        // **Eval all**: the job is the pending set the batch was built from.
+        beginAppraisal(kind: .eval, lotIDs: targets.map(\.id), isBatch: true)
+        // The money line starts on the first row the batch will answer for.
+        if let first = targets.first { pointReadout(at: first) }
         phase = .valuing
         statusText = "Evaluating \(targets.count) lot(s) from their listing text"
         // A fresh batch re-reads every lot's page: the descriptions are what makes the text-only pass
@@ -919,8 +1145,9 @@ final class AnalysisCoordinator {
         guard !lot.isPrePricing else { return }
 
         // Make the provisional state visible the moment the request starts, so a slow model reads
-        // as "thinking" rather than as nothing happening.
+        // as "thinking" rather than as nothing happening — on the row and on the modal's step line.
         lot.markPrePricing()
+        note(.evaluatingText, on: lot)
 
         do {
             record(try await service.prePrice(subject: subject), on: lot)
@@ -932,6 +1159,7 @@ final class AnalysisCoordinator {
     /// Applies one row's pre-price and unwinds its bookkeeping.
     private func finishPrePrice(of lot: LotItem, with result: Result<PrePriceEstimate, Error>) {
         prePriceTasks[lot.id] = nil
+        finishStep(for: lot)
 
         switch result {
         case .success(let estimate): record(estimate, on: lot)
@@ -941,7 +1169,14 @@ final class AnalysisCoordinator {
         // Something else is still working: let it write the closing line.
         guard prePriceTasks.isEmpty, scanTasks.isEmpty, prePriceBatchTask == nil else { return }
         phase = scansWereStopped ? .stopped : .finished
-        statusText = "\(prePricedCount) of \(lots.count) lot(s) evaluated from the listing text"
+        // A row's **Eval** keeps to its own job here, because the pill above names that row and a
+        // board-scoped line under it ("1 of 100 lot(s) evaluated") would contradict it. A batch closes
+        // out against the board, which is the number its own button was about.
+        if let job = appraisalJob, !job.isBatch {
+            statusText = "\(appraisalText(job)) — evaluated from the listing text"
+        } else {
+            statusText = "\(prePricedCount) of \(lots.count) lot(s) evaluated from the listing text"
+        }
     }
 
     /// Records a landed eval on its row and in the console.
@@ -984,6 +1219,11 @@ final class AnalysisCoordinator {
 
         settings.persist()
         scansWereStopped = false
+        // **Price all**: the job is every lot this batch will answer for, so the readout counts the
+        // rows the button was pressed for rather than the whole board.
+        beginAppraisal(kind: .price, lotIDs: targets.map(\.id), isBatch: true)
+        // As in `prePriceUnvalued`: the money line starts on the batch's first row.
+        if let first = targets.first { pointReadout(at: first) }
         phase = .valuing
         statusText = "Appraising \(targets.count) lot(s) with \(settings.activeModelID)"
         // A fresh batch re-reads every lot's page rather than reusing galleries from an earlier run.
@@ -1024,6 +1264,7 @@ final class AnalysisCoordinator {
     /// Applies one row's scan result and unwinds the scan bookkeeping when it was the last one.
     private func finishScan(of lot: LotItem, with result: Result<ValuationOutcome, Error>) {
         scanTasks[lot.id] = nil
+        finishStep(for: lot)
 
         switch result {
         case .success(let outcome):
@@ -1137,6 +1378,8 @@ final class AnalysisCoordinator {
                 // over every page. The same read feeds the photographed pass that follows, which is
                 // what `subjectForLotPage`'s cache is for.
                 let subject = await subjectForLotPage(pending[index])
+                // Handed to the model: the readout says which step the row it is speaking for is on.
+                note(.evaluatingText, on: pending[index])
                 group.addTask {
                     do {
                         return (index, .success(try await service.prePrice(subject: subject)))
@@ -1234,7 +1477,7 @@ final class AnalysisCoordinator {
                 + "via \(outcome.modelID)",
             source: .valuation
         )
-        statusText = "Valued \(terminalCount) of \(lots.count) — \(valuedCount) ok, \(failedCount) failed"
+        statusText = appraisalTally()
     }
 
     /// How many photographs travelled, out of how many the lot offered.
@@ -1259,7 +1502,7 @@ final class AnalysisCoordinator {
         lot.markFailed(message)
         failedCount += 1
         log("Lot \(lot.lotNumber) failed: \(message)", source: .error)
-        statusText = "Valued \(terminalCount) of \(lots.count) — \(valuedCount) ok, \(failedCount) failed"
+        statusText = appraisalTally()
     }
 
     // MARK: - Logging

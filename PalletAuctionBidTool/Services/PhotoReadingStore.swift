@@ -78,6 +78,9 @@ actor PhotoReadingStore {
     static func defaultDirectory(fileManager: FileManager = .default) -> URL {
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
+        // The bundle's identifier, deliberately not the app's display name: the readings already on
+        // this machine live under that string, so renaming the app must not move the directory (see
+        // the README's deviation 30). The literal is what the project sets for an unbundled run.
         let app = Bundle.main.bundleIdentifier ?? "PalletAuctionBidTool"
         return base
             .appendingPathComponent(app, isDirectory: true)

@@ -26,7 +26,19 @@ struct ScrapeProfile: Codable, Hashable, Sendable {
     /// Cards matching any of these (or living inside them) are ignored.
     var excludeCardSelectors: [String]
     /// Cards with less visible text than this are treated as empty wrappers.
+    ///
+    /// A floor for *empty* matches, not a rule for retiring lots: a tile carrying a lot number —
+    /// through `lotSignalAttributes`, or a DOM id that unwraps to one (`ItemMain19002`) — is a card
+    /// however terse its words are. A tile dropped by this floor is dropped invisibly, because
+    /// `cardCount` counts the same set, which is how a board of 100 could come back with 99 and
+    /// nothing in the log to say why.
     var minimumCardTextLength: Int
+    /// Attributes on a card element that mark it as a lot even when its visible text is short.
+    ///
+    /// The specific lot-number attributes only. The generic `data-id` of
+    /// `lotNumberAttributeCandidates` is deliberately absent: it sits on half a layout's plumbing,
+    /// and admitting every element that carries one would fill the table with tiles that are not lots.
+    var lotSignalAttributes: [String]
 
     // MARK: Field extraction
 

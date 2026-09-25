@@ -10,7 +10,7 @@ import SwiftUI
 /// A settings row: a caption on the left, the control filling whatever is left of the width.
 ///
 /// Shared by the control panel and the settings modal so a field looks and behaves the same in both,
-/// which matters because the two surfaces hold the *same* settings — the panel's Run tuning and the
+/// which matters because the two surfaces hold the *same* settings — the panel's Run Tuning and the
 /// modal's provider and login fields.
 ///
 /// `hidesControlLabel` is *on* by default — a text field's own string is a prompt rather than a

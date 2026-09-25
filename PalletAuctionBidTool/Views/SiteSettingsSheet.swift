@@ -60,8 +60,8 @@ struct SiteSettingsSheet: View {
         }
     }
 
-    /// The same question the panel's readiness pill answers, answered for this modal's fields alone:
-    /// is anything set up to appraise a lot?
+    /// The question the orange dot on the titlebar's **Account** button raises, answered for this
+    /// modal's fields alone: is anything set up to appraise a lot?
     private var statusPill: some View {
         let ready = settings.hasAPIKey
         let text = ready ? "\(settings.provider.displayName) ready" : "No API key yet"
@@ -74,7 +74,7 @@ struct SiteSettingsSheet: View {
             .padding(.vertical, 4)
             .background(tint.opacity(0.12), in: Capsule())
             .help(
-                "Run tuning decides how far a run walks and how fast it calls out; this modal "
+                "Run Tuning decides how far a run walks and how fast it calls out; this modal "
                     + "supplies the credential those calls are made with."
             )
     }

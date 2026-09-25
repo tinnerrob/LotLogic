@@ -931,6 +931,28 @@ enum ScraperScript {
         return false;
       }
 
+      // Whether a tile is a lot, rather than an empty wrapper a broad selector happened to match.
+      //
+      // The word floor alone is not enough. A compact tile — a lot number and a bid, nothing else —
+      // can say less than `minimumCardTextLength`, and a tile that carries a lot number *is* a lot
+      // whatever its word count. Dropping one is invisible, because `cardCount` counts the same set,
+      // so a board of 100 came back with 99 and no line in the log said which rule ate the odd one.
+      function carriesLotSignal(element) {
+        if (textOf(element).length >= CONFIG.minimumCardTextLength) return true;
+        for (let index = 0; index < CONFIG.lotSignalAttributes.length; index += 1) {
+          const value = String(element.getAttribute(CONFIG.lotSignalAttributes[index]) || '').trim();
+          if (value) return true;
+        }
+        // The card's own id is a DOM address on many layouts, but `ItemMain19002` is a lot number
+        // once its wrapper word is stripped — and a wrapper word plus digits is a lot.
+        for (let index = 0; index < CONFIG.lotNumberDOMIdAttributeCandidates.length; index += 1) {
+          const name = CONFIG.lotNumberDOMIdAttributeCandidates[index];
+          const value = String(element.getAttribute(name) || '').trim();
+          if (value && unwrapDOMId(value)) return true;
+        }
+        return false;
+      }
+
       function collectCards() {
         const elements = [];
         let winningSelector = '';
@@ -938,7 +960,7 @@ enum ScraperScript {
           const selector = CONFIG.cardSelectors[index];
           const candidates = each(document, selector).filter(function (element) {
             if (isExcluded(element)) return false;
-            return textOf(element).length >= CONFIG.minimumCardTextLength;
+            return carriesLotSignal(element);
           });
           if (candidates.length === 0) continue;
           if (!winningSelector) winningSelector = selector;
@@ -1077,7 +1099,8 @@ enum ScraperScript {
       function readCard(element) {
         if (!element) return null;
         const cardText = textOf(element);
-        if (cardText.length < CONFIG.minimumCardTextLength) return null;
+        // The very rule `collectCards` used to admit it, so the count and the rows cannot disagree.
+        if (cardText.length < CONFIG.minimumCardTextLength && !carriesLotSignal(element)) return null;
 
         // The card's own address first, *before* the lot number is known: on layouts that expose no
         // lot number at all it is the number, and it is the link the row offers the operator. Only

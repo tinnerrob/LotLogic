@@ -9,25 +9,26 @@ import AppKit
 import SwiftUI
 import WebKit
 
-/// One lot page, asked for from a row.
+/// One page to read: a lot asked for from a row, or the auction itself asked for from the control
+/// panel's **info** glyph.
 ///
-/// `Identifiable` because the table presents it with `.sheet(item:)`, which makes the sheet's content
+/// `Identifiable` because the callers present it with `.sheet(item:)`, which makes the sheet's content
 /// a function of the thing that was asked for. The identity is the address rather than the lot number:
 /// a lot re-listed under a new number shares one page, and what is being identified here is the page,
 /// not the row that asked for it.
 struct LotPageRequest: Identifiable, Equatable {
 
-    /// The lot's own page, as the listing exposed it.
+    /// The page, as the listing exposed it.
     let url: URL
-    /// The lot number, for the sheet's title. Carried rather than read back off the address: the
-    /// header is the only thing tying the page to the row it was opened from.
-    let lotNumber: String
+    /// What the sheet's header calls the page — `Lot 142`, or `Auction page`. Carried rather than
+    /// derived from the address, which says nothing readable about what is behind it.
+    let title: String
 
     var id: String { url.absoluteString }
 
-    init(url: URL, lotNumber: String) {
+    init(url: URL, title: String) {
         self.url = url
-        self.lotNumber = lotNumber
+        self.title = title
     }
 
     /// The request a row makes, or `nil` for a lot whose card exposed no address — the same test that
@@ -38,17 +39,18 @@ struct LotPageRequest: Identifiable, Equatable {
     @MainActor
     init?(lot: LotItem) {
         guard let url = lot.detailURL else { return nil }
-        self.init(url: url, lotNumber: lot.lotNumber)
+        self.init(url: url, title: "Lot \(lot.lotNumber)")
     }
 }
 
-/// A lot's own page as a sheet: the photographs, the full description and the bid history **Price**
-/// reads, for the operator to look at, with nothing spent to see them.
+/// A page as a sheet: a lot's own page behind a row's **Open** button, or the auction itself behind
+/// the control panel's **info** glyph — the photographs, the full description and the bid history
+/// **Price** reads, for the operator to look at, with nothing spent to see them.
 ///
 /// **Why a sheet rather than the operator's browser.** Safari is a context switch: the table being
 /// read is left behind, and a page asked for from row 142 opens into whichever window happened to be
-/// in front. The page belongs to the row that asked for it, so it is drawn over the table and leaves
-/// with a keystroke — the same shape as the window's own **Page** panel.
+/// in front. The page belongs to whoever asked for it, so it is drawn over the table and leaves
+/// with a keystroke — the same shape as the window's live **Page** panel.
 ///
 /// **Why not that panel.** `BrowserPanelView` reparents the scraper's live `WKWebView`, a captcha
 /// hand-off being the whole reason it exists: pointing *that* at a lot page would take the automation
@@ -103,7 +105,7 @@ struct LotPageSheetView: View {
     /// being the only thing a click can do.
     private var header: some View {
         HStack(spacing: 10) {
-            Label("Lot \(request.lotNumber)", systemImage: "safari")
+            Label(request.title, systemImage: "safari")
                 .microCaps(false)
 
             Text(page.address ?? request.url.absoluteString)
@@ -276,8 +278,22 @@ private struct LotPageSurface: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
 
+extension View {
+
+    /// Presents a page in the one modal both callers use: a row's **Open** button and the control
+    /// panel's **info** glyph.
+    ///
+    /// Kept beside the sheet rather than repeated at the two call sites, so "the same modal" is
+    /// something they *share* rather than something each has to remember to build the same way — the
+    /// size, the header, the drag-to-resize and the escape key all come from `LotPageSheetView`
+    /// itself.
+    func lotPageSheet(_ request: Binding<LotPageRequest?>) -> some View {
+        sheet(item: request) { LotPageSheetView(request: $0) }
+    }
+}
+
 #Preview {
     LotPageSheetView(
-        request: LotPageRequest(url: URL(string: "https://example.com/lot/142")!, lotNumber: "142")
+        request: LotPageRequest(url: URL(string: "https://example.com/lot/142")!, title: "Lot 142")
     )
 }

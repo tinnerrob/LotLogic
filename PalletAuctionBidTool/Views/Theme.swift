@@ -15,6 +15,48 @@ import SwiftUI
 /// surfaces that use it stay on the same 4-point grid.
 enum Theme {
 
+    // MARK: - Identity
+
+    /// What the app is called, spelled once for every surface that shows it: the window's titlebar,
+    /// the window's own title and the About sheet.
+    ///
+    /// This is the *product's* name, not the build's. The target, the source folder, the Xcode project
+    /// and the bundle identifier all keep the name they were created with, and that is deliberate:
+    /// `UserDefaults` is keyed by bundle identifier, so renaming the bundle would take the operator's
+    /// API keys, URLs and column choices with it — and `PhotoReadingStore`'s cache is filed under the
+    /// same string. `PRODUCT_NAME` is what puts *this* name on the app the operator actually sees.
+    static let appName = "TheLotLizard"
+
+    /// The line under the name in the About sheet: what the app does, in the words on its tin.
+    static let tagline = "Crawl the lots. Snap up the profits."
+
+    // MARK: - Splash
+
+    /// How long the launch splash stays up before it takes itself away, in seconds.
+    ///
+    /// The splash is brand rather than progress. Nothing is loaded when the app opens — a scrape
+    /// starts when the operator presses the button — so it is timed instead of being tied to work,
+    /// and a click takes it away early.
+    static let splashDwell: Double = 1.7
+    /// How long the splash takes to fade, out or in.
+    static let splashFade: Double = 0.35
+    /// The width the splash artwork is drawn at, in points.
+    ///
+    /// `SplashArt` is generated at exactly this size (and at twice it), so the page shows the art at
+    /// 1:1 rather than resampling it — and the file is trimmed to the art's own ink, so the drawn
+    /// width is the width the eye actually gets.
+    static let splashArtWidth: CGFloat = 320
+    /// Fill behind the splash in a light appearance: the near-white page the art was drawn on.
+    static let splashPageLight = Color(white: 0.98)
+    /// Fill behind the splash in a dark appearance.
+    ///
+    /// The art's name and tagline are dark ink on transparency, so a dark appearance cannot simply
+    /// reuse the light page. `SplashArt` ships a dark variant whose two lines of type are re-inked
+    /// light against the mark's own greens; this is the deep paper that variant was drawn for.
+    static let splashPageDark = Color(red: 0.055, green: 0.075, blue: 0.067)
+
+    // MARK: - Metrics
+
     /// Corner radius shared by every card.
     static let cardRadius: CGFloat = 10
     /// Outer padding of a panel's content.
@@ -51,6 +93,11 @@ enum Theme {
     static let chipPaddingVertical: CGFloat = 1
     /// Opacity of a chip's tint behind its text.
     static let chipFill: Double = 0.15
+
+    /// Height of the control panel's one row of controls — the URL field and the buttons beside it.
+    /// Taller than the table toolbar's own controls: this row is the panel's whole job, and the panel
+    /// is shallow enough to afford the air.
+    static let controlHeight: CGFloat = 30
 
     /// Letter spacing of the header's micro-caps labels. Uppercase at caption size is the one place
     /// the table raises its voice, so it is given room to breathe.

@@ -19,7 +19,7 @@ struct LotTableView: View {
     let coordinator: AnalysisCoordinator
 
     /// The bid ceiling and anchor policies the table renders, read from `AppSettings` so the
-    /// columns always agree with Run tuning.
+    /// columns always agree with Run Tuning.
     let policy: BidTargetPolicy
     let anchorThreshold: Double
 
@@ -74,10 +74,10 @@ struct LotTableView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.tableFill)
         // A lot's own page, over the table rather than in the operator's browser. Presented from here
-        // — the one place that owns the request — so the row can be a value and still open one.
-        .sheet(item: $pageRequest) { request in
-            LotPageSheetView(request: request)
-        }
+        // — the one place that owns the request — so the row can be a value and still open one, and
+        // through the same `lotPageSheet` modifier the control panel's **info** glyph uses, so the two
+        // modals cannot be anything but the same modal.
+        .lotPageSheet($pageRequest)
     }
 
     /// The table, or the state that stands in for it, in a known viewport.
@@ -199,7 +199,7 @@ struct LotTableView: View {
             .disabled(!coordinator.canScanUnvalued)
             .help(
                 "Prices every lot that has no valuation yet from its photographs, using the provider and "
-                    + "limits in Run tuning. Individual rows can be priced on their own too, and lots the "
+                    + "limits in Run Tuning. Individual rows can be priced on their own too, and lots the "
                     + "site marks sold are included."
             )
 

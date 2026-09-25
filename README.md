@@ -1,9 +1,18 @@
-# Pallet Auction Bid Tool
+# TheLotLizard
+
+**Crawl the lots. Snap up the profits.**
 
 A native macOS app that scrapes liquidation-auction lot listings from a site you sign into,
 appraises every pallet with a multimodal model (Gemini by default, DeepSeek Flash as an
 alternative), and shows the numbers in one expandable table — so you can decide, before the
 hammer falls, whether a lot is worth bidding on.
+
+> The app is called **TheLotLizard**; the Xcode project, the target, the source folder and the
+> bundle identifier all keep the name they were created with (`PalletAuctionBidTool`,
+> `com.mFT.PalletAuctionBidTool`). That is deliberate and load-bearing: `UserDefaults` and the
+> readings cache are keyed by bundle identifier, so renaming the bundle would take the operator's
+> API keys, login and column choices with it. `PRODUCT_NAME` is what puts *this* name on the app the
+> operator sees — the Dock, the menu bar, the window and the About sheet. See deviation 30.
 
 * **Scrape** — a hidden `WKWebView` logs in with your credentials and walks the result pages you ask
   for (a count from the **Pages** menu, or **All pages**), harvesting lot numbers, titles,
@@ -22,7 +31,7 @@ hammer falls, whether a lot is worth bidding on.
   own (`LotPhotoScan`), the reading is kept on this machine (`PhotoReadingStore`), and one last request
   reconciles the readings into the pallet's line items — so a small item in the corner of frame nine is
   priced rather than averaged away by the pallet in front of it, and re-scanning the same lot with the
-  same model does not pay for the same photograph twice. **Photos / scan** in Run tuning is the ceiling
+  same model does not pay for the same photograph twice. **Photos / scan** in Run Tuning is the ceiling
   for a metered key; the toolbar has the same pair for every lot that has nothing yet.
   Either reply is constrained to a JSON schema, so the app gets numbers it can add up instead of
   prose — including `evidence`, the label wording or barcode digits each price was built from, since
@@ -32,8 +41,9 @@ hammer falls, whether a lot is worth bidding on.
 * **Decide** — the table rolls those items up into per-lot retail, resale, profit and ROI, sortable
   by lot, description, bid, retail, resale, profit or ROI in either direction, with a progress bar
   and activity console at the bottom. The table always fills the window, its column boundaries are
-  drag-to-resize handlebars, and the credentials and provider live behind the title row's gear
-  (`⌘,`) rather than in the way of the rows.
+  drag-to-resize handlebars, and everything that is not the table's business lives in the window's
+  unified titlebar — **Account** (`⌘,`), **Tuning** and **About** — rather than in the way of the
+  rows.
 
 ---
 
@@ -57,7 +67,8 @@ the store on the second scan, and a failed reconciliation falling back to the on
 on-device label reader's rules for what counts as a barcode or a model number, every sort
 field, the bid ceilings, the anchor threshold, the search matching, the
 column geometry — including how it stretches to fill a wider window — the cleaning of scraped lot
-numbers, the sold / empty-catalogue rules and the address of a listing's later result pages)
+numbers, the sold / empty-catalogue rules, the address of a listing's later result pages, and what the
+progress readout counts — the pages a walk will read and the rows an appraisal covers)
 without a key or any network traffic: it compiles the real services and the real UI-free models
 against a stubbed `URLProtocol`:
 
@@ -82,25 +93,40 @@ failed, when Node is absent):
 ./Tools/scraper-js-check/run.sh      # exits non-zero if any check fails
 ```
 
-The window is one column: a control panel that folds, the lot table, the activity console and the
-progress footer.
+The brand images are generated too, for the same reason: the artwork export carries the design
+tool's transparency checkerboard *in its pixels* and no alpha channel, so it cannot be dropped into
+the catalogue as-is. `Tools/brand-assets` keys that checkerboard out, un-mixes the antialiased rim,
+trims the empty margin the export carries and writes all three image sets. It is also the script to
+re-run if the art is ever re-exported:
+
+```bash
+./Tools/brand-assets/run.sh [path/to/art.png]   # defaults to the export the assets were built from
+```
+
+The window is one column: a control panel, the lot table and the activity console, with the app's own
+mark and name and its three buttons — **Account**, **Tuning** and **About** — in the unified titlebar
+above them, and the run's progress in a modal that comes and goes with the work. A launch splash
+covers the lot for a moment on the way in and dissolves into it (see deviation 31).
 
 1. Launch the app.
 2. Paste the **lot-list URL** (the page that already lists lots, e.g. `…/auctions?page=1`).
-3. Optionally open the **gear** (top right, or `⌘,`) and fill in **Site email / Site password** —
+3. Optionally open **Account** (titlebar, or `⌘,`) and fill in **Site email / Site password** —
    leave both blank to scrape anonymously or to reuse the session already stored by the app.
-4. In the same modal, pick a **Provider** and paste its API key.
+4. In the same sheet, pick a **Provider** and paste its API key.
    **Gemini** (Google AI Studio) has a **free tier** that needs no billing account and costs
    nothing — see *Cost* below. **DeepSeek Flash** is the paid alternative: cheaper per token, but it
    draws on a prepaid balance. Each provider keeps its own key and model, so switching back and
-   forth is free. The gear wears an orange dot while the selected provider has no key, because
-   nothing can be appraised without one.
-5. Press **Scrape Lots**. Pages stream into the table; no API call is made yet. An auction with
+   forth is free. The **Account** button in the titlebar wears an orange dot while the selected
+   provider has no key, because nothing can be appraised without one.
+5. Open **Tuning** if the defaults need changing — how many pages a run walks, how fast it may call
+   out, how many of a lot's photographs a scan reads one at a time, and the bid percentages behind
+   the **Max bid** column.
+6. Press **Scrape Lots**. Pages stream into the table; no API call is made yet. An auction with
    nothing left to bid on stops on the first page and says **no active listings** — that is the
    catalogue's own answer, not a failure. Lots the site has already sold are listed too and flagged
    **Sold** in the **Active** column — a flag, not a lock: a closed lot's page still describes what
    was in it, so Eval and Price work on it like any other, and both all-lots passes include it.
-6. Press **Eval all** for a cheap text-only figure on every lot, then **Price** the rows worth
+7. Press **Eval all** for a cheap text-only figure on every lot, then **Price** the rows worth
    appraising — or **Price all** for the whole board — and sort the result by whichever number
    matters today. Drag a column's edge to resize it; the table always fills the window.
 
@@ -110,7 +136,8 @@ progress footer.
 
 ```
 PalletAuctionBidTool/
-├── PalletAuctionBidToolApp.swift    Window scene, minimum window size, menu trimming
+├── TheLotLizardApp.swift           `@main`: the one window scene, its title (`Theme.appName`), its
+│                                     default size and the trimmed menu
 ├── Models/
 │   ├── AppSettings.swift            UserDefaults-backed operator input + validation
 │   ├── ScrapedLot.swift             What one scraped card yields (+ resolved lot number, dedupe key,
@@ -131,6 +158,8 @@ PalletAuctionBidTool/
 │   ├── ScrapeProfilePresets.swift   `ScrapeProfile.genericBase()` — the default strategy
 │   ├── PaginationPlan.swift         The address of a listing's nth result page — an address in, an
 │   │                                address out, so the walking rule is testable off-device
+│   ├── RunProgress.swift            What the progress readout counts: the pages a walk will read and
+│   │                                the rows an appraisal covers (UI-free)
 │   └── ValuationProvider.swift      Gemini vs DeepSeek, with their models and settings labels
 ├── Services/
 │   ├── ScraperScript.swift          Injected JavaScript (`window.__PAS`) automation — cards, and the
@@ -154,29 +183,40 @@ PalletAuctionBidTool/
 │   └── AnalysisCoordinator.swift    @MainActor @Observable pipeline + progress/derived state, and the
 │                                    per-action cache of each lot's page (gallery + description)
 └── Views/
-    ├── ContentView.swift            Layout: control panel, table, console, footer
-    ├── ControlPanelView.swift       Title row (readiness, gear), URL and run buttons, Run tuning card
-    ├── SiteSettingsSheet.swift      The modal behind the gear: site login, provider, model, API key
-    ├── SettingsFieldRow.swift       One labelled setting — the row both settings surfaces are built from
-    ├── CollapsibleSection.swift     The expand/contract card Run tuning is built from
+    ├── ContentView.swift            Layout: control panel, table, console — and the launch splash
+    │                                over the lot of them
+    ├── SplashView.swift             The launch splash: the brand art on a page of its own, for a
+    │                                moment, then gone (see deviation 31)
+    ├── ControlPanelView.swift       The titlebar (app mark and name, Account / Tuning / About) plus the
+    │                                URL field, the run buttons and the auction page's info glyph
+    ├── SiteSettingsSheet.swift      The modal behind Account: site login, provider, model, API key
+    ├── RunTuningSheet.swift         The modal behind Tuning: run limits, then the bidding judgement
+    ├── AboutSheet.swift             The modal behind About: the app's name and tagline over what it
+    │                                does, and how to work it
+    ├── SettingsFieldRow.swift       One labelled setting — the row every settings surface is built from
     ├── Theme.swift                  Design tokens: radii, paddings, chip/card fills plus the
     │                                `.cardStyle()` / `.chipStyle(tint:)` / `.microCaps(_:)` modifiers
     ├── LotTableView.swift           Toolbar (Eval all / Price all, sort, search, the columns
     │                                gear), table
     ├── LotTableRow.swift            Header (handlebar-resizable), lot rows, item rows, the buttons
     ├── BrowserPanelView.swift       Shows the real page (captcha / MFA hand-off)
-    ├── LotPageSheetView.swift       A lot's own page as a sheet, behind the row's Open button and
-    │                                its lot number — its own web view, the scraper's cookies
+    ├── LotPageSheetView.swift       A page as a sheet, behind a row's Open button and the panel's
+    │                                info glyph — its own web view, the scraper's cookies
     ├── ResizableSheetWindow.swift   The one bit that makes a web-page sheet's window draggable, plus
     │                                the size both such sheets are built from (`WebPageSheetSize`)
     ├── LogConsoleView.swift         Folding activity console (folded, it shows the newest line; its
     │                                own chevron is the only control for it)
-    └── ProgressFooterView.swift     Progress bar, counters, running totals
+    └── ProgressSheetView.swift      The run's progress as a modal — bar, counters, the step the row
+                                     in hand is on, that row's own money, and the Stop that ends it
+├── Assets.xcassets/                 The brand images: `SplashArt` (light and dark), `AppMark` (the
+│                                    lizard alone) and `AppIcon` — all three rebuilt from the artwork
+│                                    export by `Tools/brand-assets` (see Build & run, deviation 31)
 Tools/
 ├── free-tier-harness/               Offline harness: quota retry, pacing, both DeepSeek passes,
 │                                    the table's ordering rules, bid ceilings, anchor flags, search
 │                                    matching, lot-number cleaning, the sold/empty-catalogue rules,
-│                                    column geometry — including stretch-to-fit — the column
+│                                    what the progress readout counts (a walk's pages, an appraisal's
+│                                    rows), column geometry — including stretch-to-fit — the column
 │                                    chooser, the lot's own gallery being read and its images attached
 │                                    and trimmed to one request's inline budget, the description column
 │                                    replacing the card's teaser in both passes, the on-device label
@@ -184,7 +224,7 @@ Tools/
 │                                    request per photograph, the readings reused from the store on
 │                                    a second scan, and a failed reconciliation falling back to the
 │                                    on-machine merge (see Build & run)
-└── scraper-js-check/                Runs the generated page script against a DOM shim in Node, so
+├── scraper-js-check/                Runs the generated page script against a DOM shim in Node, so
                                      the lot-number *and* sold-badge rules are checked on the page
                                      side too — and so is the lot-page reader, with a `DOMParser` and
                                      a `fetch` standing in for the browser's: gallery containers and
@@ -194,6 +234,11 @@ Tools/
                                      builds in JavaScript, the site's own
                                      carousels and arrows left out, the description column, and the
                                      meta/JSON fallback
+└── brand-assets/                    Rebuilds the three image sets in `Assets.xcassets` from the
+                                     artwork export: it keys the export's own baked-in checkerboard
+                                     out, un-mixes the antialiased rim, trims the empty margin the
+                                     export carries, and writes the splash (light and dark), the
+                                     titlebar mark and the ten icon sizes (see Build & run)
 ```
 
 **Data flow**
@@ -241,7 +286,10 @@ call a provider. A lot handed to the coordinator already carries the number the 
    *Human-in-the-loop* below.
 3. **Per page** — the script waits for lot cards *or* for the catalogue to say it has none. Cards
    are swept (lazy images, endless-ish lists) and every field extracted, including whether the site
-   has marked the lot sold; `AuctionScraperService` keeps only lots whose `dedupeKey` is new.
+   has marked the lot sold; `AuctionScraperService` keeps only lots whose `dedupeKey` is new — that key
+   being the lot's own page when the card exposed one, and only otherwise its number, so two lots that
+   print the same number on different pages are two lots. Each page says how many cards it found and
+   how many were new, and names any card that yielded no lot or repeated one already on the board.
    Pagination is **by address first** — page 2 is the run's address carrying `?page=2`, page 3
    carries `?page=3`, and so on (`PaginationPlan`), using the site's own link for a page when it
    printed one — with a click of the site's own "next" control kept for listings that address
@@ -251,11 +299,19 @@ call a provider. A lot handed to the coordinator already carries the number the 
    own "no results" surface matches (`noResultsSelectors` + `noResultsTextPattern`) ends the run
    instead of timing out: on page 1 that is reported as **no active listings**, not as a broken page.
 4. **Scrape only** — the run ends there. Nothing is appraised automatically, so loading a board of
-   200 lots costs nothing and touches no API key. The footer's bar measures the walk itself — pages
-   read out of the pages this run was asked to read — so three pages fill a third, two thirds, then
-   all of it, and the run's own work is done at 100% ("Loaded 200 lot(s) — nothing scanned") until
-   something is scanned. (An **All pages** walk of a listing that reports no page count has no honest
-   denominator, so the bar spins instead: see `AnalysisCoordinator.progressFraction`.)
+   200 lots costs nothing and touches no API key. The progress modal's bar measures the walk itself —
+   pages read out of the pages this run is going to read — so three pages fill a third, two thirds,
+   then all of it, and the run's own work is done at 100% ("Loaded 200 lot(s) — nothing scanned") until
+   something is scanned. "The pages this run is going to read" is the smaller of the **Pages** budget
+   and the listing's own count: asking for 1 page of a four-page listing is a one-page job, and both
+   the bar and the pill say so (`page 1 of 1`). (An **All pages** walk of a listing that reports no
+   page count has no honest denominator, so the bar spins instead: see `PageWalkProgress`.) The rows
+   land one at a time: a page's cards come back in a single payload, so what the walk hands over —
+   and what the table and the pill's lot count move on — is the app's own insertion of them, one
+   `ScraperEvent.lotExtracted` per row, with a frame's worth between rows). The bar counts that too:
+   it fills with the cards of the page being read, not only with the pages already read, so a **1 page**
+   run creeps as the board fills instead of standing at nothing and then snapping to full
+   (`PageWalkProgress.fraction`).
 5. **Price a lot** — each row carries three buttons. **Eval** runs the cheap text-only pass: one
    request, no photograph fetched or billed, no line items, so the row keeps saying "not scanned"
    while its money columns show a provisional figure — the row's `provisional` flag and its italics
@@ -291,6 +347,26 @@ call a provider. A lot handed to the coordinator already carries the number the 
    left. The table is keyed on the columns being drawn, so flipping a switch rebuilds it outright
    rather than letting the header and the rows disagree about a layout that only exists at the
    window's width (deviation 23).
+
+   **What the modal says while all that happens** is the readout's whole job, and it is drawn from
+   the work in hand three times over. The pill names the job: a row's button names its row
+   (`Evaluating Lot #19002`, `Pricing Lot #19002`, because that is whose figure it is), and an all-lots
+   button counts its way through the rows it was built for (`Evaluating Lot #3 of 12`,
+   `Pricing Lot #4 of 12`) — a batch's place is a position, never a board's lot number, since lot
+   numbers do not run from 1. The line under the counters is the *step* the row in hand is on, and it
+   moves with every request the appraisal makes: `reading the lot's own page`, `evaluating from the
+   listing text`, `photograph 5 of 12`, `reconciling 12 reading(s) into the line items` — the events
+   the thorough pipeline was already reporting, finally visible instead of only in the console
+   (`AppraisalStep`). The bar counts the same way: a started step contributes a share of its row
+   (a tenth for the page read and the text-only look, the bulk of it scaled by the row's own gallery,
+   nine tenths for the reconciliation), so it creeps photograph by photograph and only reaches a row's
+   whole share once that row is actually answered. And the money line at the bottom edge speaks for the
+   row in hand — its open bid, its retail, its resale and the difference, taken from its valuation when
+   it has one and from its text-only eval until then (`LotMoney.provisional` marks which) — because the
+   board's totals are the wrong scope for it twice over: a single row's **Price** moved none of them,
+   and an **Eval** run moved none of them either, an eval writing a provisional figure rather than a
+   valuation. Nothing in hand (a fresh board, or a cleared one) falls back to the board's own totals,
+   which is the only scope left to report.
 6. **Roll up** — per lot: total retail, total resale, profit, ROI and a status badge. Each row also
    shows a **Max bid** — the highest bid worth placing, a tuned percent of the resale figure taken at
    the lot's *weakest* confidence level, and red once the live bid passes it. A ceiling that rests on
@@ -301,8 +377,9 @@ call a provider. A lot handed to the coordinator already carries the number the 
    $19 ea retail · sealed retail · front left`). That list is the point of the thorough scan: a figure
    can be traced back to a picture, and the frame that held nothing is listed as holding nothing
    rather than omitted. Any
-   line at or above the **Anchor ≥** threshold (default $100) is flagged as an anchor. The footer
-   shows live counters and totals for the whole board.
+   line at or above the **Anchor ≥** threshold (default $100) is flagged as an anchor. The progress
+   modal shows live counters for the whole board, the step the row in hand is on, and that row's own
+   open bid, retail, resale and profit as they land (deviation 29).
 
 ### How one scan works
 
@@ -321,7 +398,9 @@ supplies two things: how to ask about one photograph, and how to ask for the rec
    paced by the shared `RequestPacer` and run a few at a time (three by default), so a slow provider's
    latency is hidden without bunching calls.
 3. **The readings are kept.** `PhotoReadingStore` writes them to `~/Library/Application Support`,
-   keyed by lot number, model and prompt version. The next scan of that lot with that model restores
+   under the bundle's own identifier (`com.mFT.PalletAuctionBidTool`) — not the name on the tin,
+   which is a label rather than an address — keyed by lot number, model and prompt version. The next
+   scan of that lot with that model restores
    them and re-reads only the photographs it has never seen — so **re-scanning costs the
    reconciliation, not the gallery**, and changing model, or suspecting a bad read, is what the
    settings modal's **Forget** button is for.
@@ -400,12 +479,17 @@ paginates for ever cannot hold a run open.
 
 A hidden web view cannot be clicked, so the app hands the real page back to you:
 
-* Press **Page** in the control panel (or let a challenge open it automatically) to see the live
-  `WKWebView` — the *same* instance the automation is driving, cookies included. The sheet's edges are
-  drag handles, so a challenge screen can be given the room it needs.
-* Solve the captcha / enter the MFA code there, press **Done**, then **Scrape Lots** again.
-  Because the app reuses one web view and one data store, the run resumes authenticated.
-* The automation keeps running while the sheet is open, so page logs stay live in the console.
+* A challenge opens the live page by itself: the run reports it and the sheet comes up. That sheet is
+  the scraper's *own* `WKWebView` — the *same* instance the automation is driving, cookies included —
+  reparented into a window whose edges are drag handles, so a challenge screen can be given the room
+  it needs.
+* The **info** glyph beside the URL field opens a page as well, and it is the reading one: the address
+  in the field, in a second web view on the same cookie jar (see the note on the row's **Open** button
+  under deviation 17). Signing in there once is enough — every later run inherits the session — and
+  nothing about a run in flight changes.
+* Solve the captcha / enter the MFA code in whichever sheet came up, press **Done**, then **Scrape
+  Lots** again. Because the app reuses one web view and one data store, the run resumes authenticated.
+* The automation keeps running while a sheet is open, so page logs stay live in the console.
 
 
 ---
@@ -415,12 +499,12 @@ A hidden web view cannot be clicked, so the app hands the real page back to you:
 | Value | Where it lives | Notes |
 | --- | --- | --- |
 | Auction URL, tunings, provider, model IDs | `UserDefaults` | Written when a run or a scan starts. |
-| Site email / password | `UserDefaults` | **Plaintext caveat — see below.** Edited in the settings modal (⌘,). |
+| Site email / password | `UserDefaults` | **Plaintext caveat — see below.** Edited in the Account sheet (⌘,). |
 | Gemini API key | `UserDefaults` | Sent as the `x-goog-api-key` header, never in a URL or a log line. |
 | DeepSeek API key | `UserDefaults` | Sent as `Authorization: Bearer …`, never in a URL or a log line. |
 | Site login cookie | `WKWebsiteDataStore.default()` | App container; persists between launches. |
 | Scraped lots / valuations | memory only | Nothing is written to disk; quitting discards results. |
-| Per-photograph readings | `~/Library/Application Support/<app>/PhotoReadings/` | One JSON file per lot, keyed by model + prompt version, so a re-scan reuses what it already paid for. Cleared from the settings modal's **Forget** button. |
+| Per-photograph readings | `~/Library/Application Support/<bundle id>/PhotoReadings/` | One JSON file per lot, keyed by model + prompt version, so a re-scan reuses what it already paid for. Cleared from the Account sheet's **Forget** button. `<bundle id>` is `com.mFT.PalletAuctionBidTool` — the bundle's own address, which is what the app is *built* as, not the name it prints (see deviation 30). |
 | Which columns the table shows | `UserDefaults` | Written the moment a column is hidden or shown in the table's gear, so the choice survives a relaunch. Only that key is written — see deviation 23. |
 
 **Known caveat:** credentials and the API keys live in `UserDefaults`, which is not an encrypted
@@ -625,7 +709,7 @@ driving a consumer web page" is not, deliberately.
     saying "not scanned", renders its provisional figures in italics, and a real valuation retires
     them (`applyValuation` calls `clearPrePrice`). The alternative — leaving the money columns blank
     until the expensive pass lands — wastes the one thing the operator already paid for: the
-    listing text. This used to be a **Text-only first look** switch beside **Eval** in Run tuning;
+    listing text. This used to be a **Text-only first look** switch beside **Eval** in Run Tuning;
     the switch asked the operator to weigh a trade the app is better placed to answer (a row with no
     figure wants the cheap pass), and **Eval all** remains for pricing a board with no photographs
     at all.
@@ -665,14 +749,17 @@ driving a consumer web page" is not, deliberately.
     and which addresses those are is profile data (`nonLotHrefPattern`), not code. A row the listing
     gave nothing for keeps two buttons, and the log says how many did: `Page 1 extracted: +24 row(s)
     …; 24/24 with a lot-page address`.
-    It is *not* the window's **Page** panel, and it is no longer the operator's browser either. That
+    It is *not* the live **Page** panel, and it is no longer the operator's browser either. That
     panel reparents the scraper's live `WKWebView` (deviation 19's captcha hand-off), so pointing it at
     a lot would take the automation off the results page it is working on. A browser tab was the old
     answer to that, at the price of leaving the table — and of opening into whichever window was in
     front, on top of the lot the operator was comparing. `LotPageSheetView` is the third option and the
     one actually wanted: a *second* web view on the same default `WKWebsiteDataStore` the scraper uses,
     so the page arrives signed in with the session the run just earned, the automation's page never
-    moves, and a challenge cleared in the sheet counts for the next run as well. Safari is still one
+    moves, and a challenge cleared in the sheet counts for the next run as well. The control panel's
+    **info** glyph is this sheet again — the same code path, pointed at the auction address in the URL
+    field rather than at a row — which is what replaced the old **Page** button's reparenting of the
+    live page. Safari is still one
     click away — **Open in Browser** in that sheet's header — for printing or a site that misbehaves
     in a web view, so the old behaviour became a choice rather than a dead end. The sheet can be dragged
     to the size the page wants, which is not something a SwiftUI sheet does on its own: one arrives as
@@ -681,7 +768,7 @@ driving a consumer web page" is not, deliberately.
     that mask itself (`resizableSheetWindow()`) instead of giving up `.sheet(item:)` and
     reimplementing **Done** and the escape key for a hand-hosted `NSWindow`. A gallery, a long
     description and a bid history are read rather than glanced at, so the same opening size and the
-    same drag apply to the **Page** panel too — one value, `WebPageSheetSize`, for both sheets. The
+    same drag apply to the live **Page** panel too — one value, `WebPageSheetSize`, for both sheets. The
     three of them are
     fixed chrome in a column of their own — `LotColumn.scan`, untitled (`LotColumn.scanTitle` is empty:
     three labelled buttons do not need a legend over them, and the header still draws a cell of that
@@ -700,28 +787,85 @@ driving a consumer web page" is not, deliberately.
     alone — only a *known* wrapper word followed by digits is unwrapped — and a card that still has
     nothing borrows the number from its own deep link before falling back to a content hash. The
     same rule is applied on the page side, so `ScrapeProfile` carries the wrapper-word list too.
-19. **Site login & valuation is a modal behind a gear, not a card in the panel.** Those four fields
-    are set once per install, and as an expanded card they cost the table about 120 points of height
-    on every launch — the one resource a hundred-row table actually needs. So the panel's title row
-    now carries a gear (`⌘,`) that opens `SiteSettingsSheet`: site email and password, provider,
-    model and the provider's own key, with one line of grey type each and a full-width line for the
-    key, which is pasted rather than typed. Nothing was hidden by the move: the summary line the
-    folded card used to show ("no site login · Gemini · gemini-2.5-flash · no key") still sits beside
-    the gear, the gear wears an orange dot while the selected provider has no key, the modal
-    states the same thing as a pill, and every "add a key" hint in the table and the footer now
-    names the gear instead of the card. Edits apply as typed — there is no Cancel — which is why the
-    footer button says **Done**; both surfaces are built from `SettingsFieldRow`, so the panel's Run
-    tuning and the modal cannot drift apart. **Run tuning** stays a folding card: unlike credentials,
-    its numbers are worth watching and changing mid-session. Inside it the fields now run one per
-    line — `Pages`, then **Requests / min**, then **Photos / scan**, a hairline, then the three bid
-    percentages and the anchor threshold — rather than two and then four across. Across the width the
-    captions landed at four
-    different x positions, so the card could not be read down a column, and the controls had to share
-    the space: the **Pages** menu wants to say how long *this* listing is, and a menu that has to fit
-    beside a stepper in half a window cannot say much. The stacked form costs about 100 points of
-    height in a card that is folded by default, and buys one label column with the whole window left
-    over for each control (the panel's own `tuningField`, which pins a picker or stepper to the left
-    where `SettingsFieldRow` would otherwise let it float in the slack a text field would fill).
+    Two rules that could each retire a lot in silence are settled with it, because together they are
+    how a board came back **one short of the listing** with nothing anywhere to explain it. The word
+    floor in `collectCards` / `readCard` dropped a compact tile that carried a lot number but said
+    little, and the dedupe — keyed on the resolved number *alone* — dropped the second of two lots that
+    print the same number on different pages. Neither was visible: `cardCount` counts the same set the
+    floor does, and a suppressed duplicate was never mentioned. Now the floor admits any tile carrying
+    a lot number (`lotSignalAttributes`, or a DOM `id` that unwraps to one), the dedupe keys on the
+    lot's own page and falls back to the number only when the card exposed no page, and every page
+    names whatever it did not turn into a row. Both halves are pinned offline: the harness checks that
+    one lot page linked two ways is one lot, and that two lots printing the same number on different
+    pages are two lots.
+19. **The window's own titlebar is the app's chrome: Account, Tuning and About.** The panel used to
+    carry three stacked rows above the table — a title row with the app's mark, a readiness pill and a
+    gear, the URL row, and a folding **Run Tuning** card — and all of it came out of the height a
+    hundred-row table actually needs. The title row is now the window's *own* titlebar: a SwiftUI
+    toolbar sits where the traffic lights already live, and `windowToolbarStyle(.unified(showsTitle:
+    false))` drops the system title so the app's icon and name are drawn there instead of two titles
+    fighting. Three menus live at the bar's *trailing* edge. Landing them there took
+    `ToolbarSpacer(.flexible)` (macOS 26, with the macOS 14–15 fallback of a plain `.primaryAction`
+    group): on macOS 26 a trailing group on its own is laid out where the leading content ends, so
+    the trio read as "next to the title" rather than "the window's buttons". The name is a label and
+    not a control, so it opts out of the shared glass background macOS 26 puts behind every toolbar
+    item (`.sharedBackgroundVisibility(.hidden)`) — the capsule behind a title is chrome for nothing.
+    The menus then had to draw their own chrome too: macOS 26 *ignores* `buttonBorderShape` on
+    toolbar buttons, so a squared-off corner means the same opt-out plus a `ButtonStyle` that owns the
+    fill, the corner (5pt — a capsule is nearly half the button's height), the hairline and the hover
+    and press states, rather than trying to reshape the system's. **Account** (`⌘,`) is the old gear,
+    unchanged behind the glass: `SiteSettingsSheet` still holds the site email and password, the
+    provider, the model and the provider's own key, and its tooltip carries the summary line the
+    folded card used to print ("no site login · Gemini · gemini-2.5-flash · no key") — the move must
+    not hide *which* provider is armed or whether it has a key, because those two facts decide
+    whether the table's **Eval** and **Price** buttons do anything. The gear's orange dot came back
+    for the same reason: with a tooltip and a button that say nothing at rest, the dot is what warns
+    that no key is set and nothing can be scanned. **Tuning** opens `RunTuningSheet`, which is the
+    folding card's contents as a modal — the run's limits (`Pages`, **Requests / min**,
+    **Photos / scan**) over a hairline, then the bidding judgement (the three confidence percentages
+    and the anchor threshold), one field per line so the captions line up and each control keeps the
+    whole width. The fields themselves are unchanged and still built from `SettingsFieldRow`, so the
+    two sheets cannot drift apart; edits still apply as typed, which is why both footers say
+    **Done**, and the header keeps a one-line summary ("1 page(s) · 10 requests / min · every
+    photograph per scan"). **About** opens `AboutSheet` — the app's name and tagline, its version read
+    off the bundle, then a short prose tour of a session and of the two rooms the operator has to
+    know, so the window can say what it is for without a bundled document. It was reached as *Help*
+    until the app was named; see deviation 30. Moving the tuning card out of the panel retired
+    `CollapsibleSection`, whose only consumer it was.
+    The row under the bar was then squared off to match the menus above it. Because macOS 26 ignores
+    `buttonBorderShape` on any button, **Scrape Lots** — the row's one accent-filled control — and
+    **Stop** and **Clear** are painted by `PanelActionButtonStyle`: one corner (6pt, `Theme.chipRadius`),
+    one height (`Theme.controlHeight`, 30pt), two emphases and the same hover and press states, so the
+    three read as a set. The URL field is a box rather than a labelled `SettingsFieldRow`: a magnifier,
+    `Theme.fieldFill`, and the accent hairline the table's own search box turns on while it is focused —
+    held while the field carries a runnable address, so the panel's one input stays visible without a
+    caption over it. The glyph at the row's end is the old **Page** button as the **info** it always
+    was: it opens the address in the field through the same `LotPageSheetView` a row's **Open** button
+    presents (deviation 17), so a deliberate look at the auction is a resizable sheet with its own web
+    view, and the automatic captcha hand-off is the only thing that reparents the automation's live
+    page now. The trio on the bar also stops `titlebarTrailingInset` (8pt) short of the window's
+    trailing edge: the corner radius eats into the bar's last few points, and a button ending flush
+    with it read as clipped.
+    The run's progress moved out of the window altogether. It used to be `ProgressFooterView` — a
+    bar, a counters line and the money totals pinned under the console — which took a permanent strip
+    of the table's height for a readout that only means anything while work is running. It is now
+    `ProgressSheetView`, a modal the control panel raises when `AnalysisCoordinator` has work in
+    flight and lowers when it has none, so nothing covers the table with nothing to watch. That move is
+    what let the row drop its **Stop**: the button that ends a run belongs to the run being watched,
+    so it lives in the sheet, and the row carries a **Progress** button *while* something is running —
+    the way back to the sheet after **Hide** (escape) puts it away without stopping anything. Stop
+    deliberately has no shortcut of its own: escape dismissing a sheet is a reflex, and a reflex that
+    killed a half-finished scrape would be a trap. The sheet kept the footer's four parts — the pill,
+    the bar, the counters and a money line — and gained the one it was missing: the *step* the row in
+    hand is on, which is what a photograph-by-photograph appraisal actually spends its time doing. Its
+    money line changed scope rather than position: it speaks for that same row now (deviation 29).
+    Two more of the row's states were settled with it.
+    The URL field now wears the table's own search-box treatment exactly
+    (`LotTableView.searchField`): an accent border while the caret is in it, and the ordinary hairline
+    the moment it leaves, rather than staying lit whenever it happened to hold an address. And the
+    panel's **info** glyph presents its page through `lotPageSheet`, the very modifier a row's **Open**
+    button uses, so "the same modal" is one implementation the two call sites share rather than two
+    that have to be kept in step.
 20. **The table fills the window, and its column boundaries are handlebars.** Two related fixes for
     the same complaint — that a wide window left a dead strip beside the **Status** column and a
     short list of lots floated in the middle of a tall one. On width: the table measures its
@@ -769,7 +913,7 @@ driving a consumer web page" is not, deliberately.
     page 1 instead of waiting out the render timeout — but only after the message has held for two
     consecutive polls, so a client-rendered grid that flashes its empty surface for a frame before the
     first cards arrive is not abandoned. The coordinator treats it as a *finished* run,
-    not a failure: the footer and the console say "no active listings", and the table's empty state
+    not a failure: the console logs "no active listings", and the table's empty state
     explains it rather than inviting you to press **Scrape Lots** again. If every scraped lot is sold,
     the same wording is used for the board it just loaded. Both rules are pinned offline: the harness
     compiles the two regular expressions (check 28) and the Node DOM shim drives the real generated
@@ -813,8 +957,9 @@ driving a consumer web page" is not, deliberately.
     ellipsis one, because a width is a column's business, and it resets widths *only*: a column
     somebody went looking for is not a width. The choice is written the moment it is made — but only
     that one key, so flipping a switch cannot be the thing that commits a half-typed URL into the
-    defaults. The gear wears the same dot the settings gear wears: there it means "not configured
-    yet", here "not everything is being shown". The rules are pinned by harness check 29.
+    defaults. The columns gear wears a dot while anything is hidden: not "not configured yet", as
+    the orange dot on **Account** means, but "not everything is being shown". The rules are pinned
+    by harness check 29.
 
 24. **The number of photographs is the lot's business, not a setting — so the app reads the lot's own
     page.** There was an `Images / lot` stepper (1–8, defaulting to 4), and it was wrong for the same
@@ -1022,11 +1167,124 @@ driving a consumer web page" is not, deliberately.
     no arithmetic; `Task.isCancelled` is still read in the body, before the hop, because that question
     is about the task asking it.
 
+29. **The progress readout counts the work that was asked for, not the size of the site.** Two
+    numbers in the modal's pill were honest-looking but wrong, and both were wrong the same way — the
+    denominator was something other than the job in hand. A run told to walk **one page** of a
+    four-page catalogue printed `page 1 of 4`, promising three pages that were never going to be read,
+    and a row's **Price** printed `0 of 100` on a hundred-lot board, which is the denominator of a job
+    nobody asked for. The pill is the *only* place a run's shape is visible, and neither reading looks
+    like a fault from inside the app: both read as work in progress. So the two rules moved into
+    `Models/RunProgress.swift` as value types with their own checks in the offline harness, and the
+    coordinator only feeds them. `PageWalkProgress.target` is the **smaller** of the **Pages** budget
+    and the listing's own count — a walk stops when the pagination runs out of pages, so a budget
+    longer than the listing is the listing's length, and one shorter than it is the budget: `1 page`
+    against a four-page site is *page 1 of 1*. `AppraisalJob` carries the rows an appraisal covers: an
+    `Eval` / `Price` job is the one row its button named (`Evaluating Lot #19002`, `Pricing Lot #19002`,
+    joined by a second click while the first still runs, since `canScan` allows clicking through several
+    rows at once), and a batch is the pending set its own button was built from — counted by place,
+    since a batch's pill says where in *itself* it has got to (`Evaluating Lot #3 of 12`) rather than
+    naming a lot number that would read as a position. Which one it is comes from the button that started
+    it rather than from the lot count, which is why a job's rows are held in the order they joined it. The
+    counters line and the two per-row status lines keep speaking for the whole board, because that is
+    the tally the pill cannot show (`1 ok, 0 failed` out of a hundred rows). The values grew two more
+    shapes in the same file, both of them things the readout was previously guessing at. `AppraisalStep`
+    is the step the row in hand is on — the row's own page, the text-only look, `photograph 5 of 12`, the
+    reconciliation, or the single-pass fallback — each with the phrase the modal prints and the share of
+    its row the bar counts, mapped from the `PhotoScanEvent`s the thorough pipeline was already
+    reporting. That is what turned the bar from something that jumped a row at a time into something
+    that creeps per photograph, and it is why a scan no longer reads as frozen for the minutes a dozen
+    requests take. The pill's wording moved with it: a row's button *names* its row
+    (`Evaluating Lot #19002`) while an all-lots button *counts* through the rows it was built for
+    (`Pricing Lot #3 of 12`), which is why a job now keeps its rows in the order they joined it rather
+    than in a set — a batch's place has to be readable. And `LotMoney` is the bottom line's scope: the
+    row in hand's own open bid, retail, resale and profit, from its valuation when it has one and its
+    text-only eval until then. The board's totals used to sit there and moved for neither a single row's
+    **Price** nor an **Eval** run at all — an eval writes a provisional figure, and the board's totals
+    only ever summed valuations — so the line followed the work instead, falling back to the board only
+    when no row is in hand.
+
+30. **The app is TheLotLizard, and *Help* became *About*.** The tool was built under one name and is
+    used under another: **TheLotLizard**, with one line saying what it is for — *"Crawl the lots. Snap
+    up the profits."* The rename stops at the glass on purpose. `PRODUCT_NAME` (and a matching
+    `CFBundleDisplayName`) is what puts the new name on the app the operator actually sees: the Dock,
+    the menu bar, the window title and Finder. The Xcode project, the target, the source folder and
+    the bundle identifier (`com.mFT.PalletAuctionBidTool`) keep the names they were created with,
+    because a bundle identifier is a *data* address rather than a label. `UserDefaults` — the site
+    login, both API keys, the auction URL, the hidden columns — is filed under it, and so is
+    `PhotoReadingStore`'s cache of readings (`~/Library/Application Support/<bundle id>/`). Renaming
+    the bundle is therefore a rename of the operator's saved state: an update that looked like
+    cosmetics would silently orphan every key, every saved URL and every reading already paid for, and
+    the app would come up looking freshly installed with no key and nothing to reuse. The build
+    *identity* stays put and the *label* moves, which is the one arrangement where the rename is free.
+    The titlebar's third menu was renamed with it, **Help** to **About**, and the file behind it
+    `HelpSheet.swift` to `AboutSheet.swift`. It was never a help affordance in the first place —
+    nothing about it is context-sensitive, it is not opened by a `?`, and a Help that answers questions
+    the window already answers in its tooltips promises documentation this app does not have. What it
+    holds is what an about box holds, and it now leads with it: the name, the tagline, and the version
+    read off the bundle (`CFBundleShortVersionString` / `CFBundleVersion`, so the sheet cannot claim a
+    version the build is not), then the same prose tour of a session it always carried. The name and
+    the tagline are spelled exactly once — `Theme.appName` and `Theme.tagline` — because the titlebar's
+    title, the window's own title and the About sheet all print them, and a name typed in three places
+    is a name that will eventually be typed three ways.
+
+31. **The app wears its own art: a launch splash, a real icon, and the mark in the titlebar.** None of
+    the three existed as artwork before — the titlebar's mark was a `shippingbox.fill` glyph in a
+    gradient tile, and the icon set was an empty iOS-shaped `AppIcon` with no images in it. The art is
+    the designer's own export, and all three sets come out of one file (`SplashArt`, `AppMark`,
+    `AppIcon`), so the shirt and the app cannot drift apart.
+    **The splash is brand, not progress.** Nothing is read, scraped or appraised while it is up, so
+    there is no work to tie it to and nothing it could honestly report: it is timed (`Theme.splashDwell`,
+    1.7s) and a click takes it away early for an operator who has seen it before. It is an *overlay over
+    the window*, not a sheet and not a second window — the panel underneath is live the whole time, and a
+    sheet would have to be dismissed and would slide off the window rather than hand it back. `ContentView`
+    owns the one flag; `SplashView` owns both exits (its timer and the click) and the fade, and
+    `ContentView(showsSplash: false)` is what previews pass, because a preview is not a launch.
+    **Two appearances, because the art is dark ink.** The name and tagline are drawn in dark type, which
+    disappears on a dark page, and a dark appearance cannot simply reuse a white one behind a bright
+    card without flashing the window white at every launch. `SplashArt` therefore ships a dark variant
+    whose two lines of type are re-inked light — the mark's own greens are left exactly as drawn, since
+    they read on either page — and `Theme.splashPageDark` is the deep paper it sits on. The page follows
+    the appearance; the art follows the catalogue, which is where a dark variant belongs.
+    **Nothing is resampled at runtime.** The export carries roughly a fifth of empty margin on every
+    side, which is why a splash drawn at a sane width reads a third smaller than it is; the assets are
+    trimmed to the art's own ink and then generated *at the size the window draws them* (`320pt` and
+    2× that), so `Theme.splashArtWidth` is the width the eye actually gets.
+    **The supplied artwork needed rebuilding to be usable.** The exports are flat RGB — the design tool's
+    transparency checkerboard (`#CCCCCC`/`#FFFFFF`, 10px cells) is baked into the pixels and there is no
+    alpha channel — and the file named for the icon is the designer's whole *size sheet* (1024/512/256/
+    64/32/16 panels, labels and all) rather than a single icon. `Tools/brand-assets` therefore rebuilds a
+    real matte: it classifies the checkerboard (nothing in the art is neutral *and* that light), flood
+    fills it in from the border so the light ink *inside* the art — the mark's eye, the gaps between its
+    legs, the counters of the wordmark — is never eaten, and un-mixes the one-pixel antialiased rim so no
+    grey halo survives on a coloured page. The mark for the icon and the titlebar is cut from the splash
+    art, which is the largest clean copy of it to hand; a single 1024px icon exported *with* real alpha is
+    the one thing that would improve it.
+    **The icon is a macOS icon set, not one 1024.** The appiconset the template shipped held three
+    `universal`/`platform: ios` entries and no files at all; a Mac app icon is a set of rasters, so what
+    is there now is the ten `mac` entries (`16…512`, 1× and 2×), with the mark drawn into the middle four
+    fifths of the canvas — where macOS's own icon grid expects an app's artwork to sit. It is the bare
+    mark rather than a tile, which is what the designer's small-size panels show. All ten land in
+    `Assets.car`, which is what `CFBundleIconName` points the system at; the `AppIcon.icns` Xcode emits
+    beside it carries only a subset (16 and 128 here), so the catalogue is the icon that matters.
+    **The titlebar's mark is the icon in miniature**, on a pale tile: that art is transparent, and its
+    dark greens would sink into a dark titlebar without something behind them. It replaced a gradient tile
+    and an SF Symbol, and the name beside it is still `Theme.appName` — the same single spelling the
+    window title and the About sheet use.
+
 ---
 
 Selectors live in data, not code: edit `ScrapeProfilePresets.genericBase()` or add a new
 `ScrapeProfile` and hand it to `AuctionScraperService(profile:)`. Every list is tried in order,
 most specific first. Nothing in `ScraperScript.swift` has to change.
+
+Two rules decide whether a tile is a card at all, and both matter when a board comes back one short
+of the listing. `minimumCardTextLength` is the floor that keeps a broad selector's empty wrappers
+out; `lotSignalAttributes` — plus a DOM `id` that unwraps to a number (`ItemMain19002`) — admits a
+tile that carries a lot number however little it says, so a compact card is a lot rather than a
+silent loss. A card counted by one rule and retired by the other is exactly how a page of 100 became
+99 with nothing in the log to explain it, which is why the two share one test and why every page now
+says `N cards …, M new` and names, on its own line, any card that yielded no lot or turned out to be
+one already on the board.
 
 Two of those lists are about a lot's *state* rather than its fields, and they are the ones to check
 first on a new site:
@@ -1066,24 +1324,32 @@ when a card carries three links.
 
 | Symptom | Likely cause / fix |
 | --- | --- |
+| The app is called TheLotLizard, but Xcode, its folder and the saved settings still say PalletAuctionBidTool | Working as intended — the label moved, the build's identity did not. Finder, the Dock and the menu bar read `PRODUCT_NAME` / `CFBundleDisplayName` (`TheLotLizard.app`), while the project, the target, the source folder and the bundle identifier keep their original names, because `UserDefaults` and the readings cache are keyed by bundle identifier. See deviation 30. |
+
 | "No lot cards were found" | The log prints page diagnostics (matched selectors, card counts, ready state). Check that the URL really is a listing page, then widen `cardSelectors`. |
-| A run stops after page 1, or after a few pages | Working as intended, and the log says which reason fired — the walk ends at the first page with no lots on it, and every stop is reported: *"The listing reports N page(s) — there is no page 2"*, *"No lot cards appeared on page 2 — the listing has no such page"*, *"Page 2 served a page already read …"*, *"The listing did not change after clicking next"*. Pages are asked for by address (deviation 6): `?page=2`, `?page=3`, …, in the parameter the listing was seen using, and with the listing's own link for the page when it printed one. So the fix is the address shape: check in **Page** whether the *next* page really is `?page=2` (a POST or a JS-only pager is what the click fallback covers — widen `nextPageSelectors` for that), and note that `?p=`-shaped pagination is deliberately not read as a page number. |
+| A run stops after page 1, or after a few pages | Working as intended, and the log says which reason fired — the walk ends at the first page with no lots on it, and every stop is reported: *"The listing reports N page(s) — there is no page 2"*, *"No lot cards appeared on page 2 — the listing has no such page"*, *"Page 2 served a page already read …"*, *"The listing did not change after clicking next"*. Pages are asked for by address (deviation 6): `?page=2`, `?page=3`, …, in the parameter the listing was seen using, and with the listing's own link for the page when it printed one. So the fix is the address shape: check in the **info** page window whether the *next* page really is `?page=2` (a POST or a JS-only pager is what the click fallback covers — widen `nextPageSelectors` for that), and note that `?p=`-shaped pagination is deliberately not read as a page number. |
 | A run walks past the last page, or loops | Should not be possible: the listing's own page count ends the walk when it reported one, a repeated page signature is caught against every page already read, and `ScrapeLimits.maximumPages` is the 100-page runaway guard. If it happens anyway, the site is answering different content for the same page number (a rotating "recommended" strip is enough) — the log's `Pagination: asked for page N, the site's address says page M` line says which address it actually landed on. |
-| "No active listings" | Working as intended (deviation 22): the page's own empty state — *"Results: No Items Found."* — or every scraped lot being marked sold. Nothing was spent and nothing failed. If the auction really does have lots, widen `noResultsSelectors` / `noResultsTextPattern` (a false positive) or check the **Page** panel. |
+| "No active listings" | Working as intended (deviation 22): the page's own empty state — *"Results: No Items Found."* — or every scraped lot being marked sold. Nothing was spent and nothing failed. If the auction really does have lots, widen `noResultsSelectors` / `noResultsTextPattern` (a false positive) or check the auction page through the **info** glyph. |
+| The board holds fewer lots than the listing shows | Read the console first: every page logs `N cards …, M new`. A *"yielded no lot"* line means the card selectors matched a tile nothing could be read from, so widen `cardSelectors` (or the tile is genuinely empty) — the count of `with a lot-page address` on the extracted line is the other clue. A *"lots already on the board"* line means two cards resolved to the *same lot page*, so check `detailLinkSelectors` and `nonLotHrefPattern`: an anchor that is not the lot's own (the catalogue, a share link) makes two lots look like one. |
 | The **Active** column says "Sold" on lots that are still open | The sold rule matched something the site did not mean. The site's own badge is the authority (a short status element, then a card attribute, then the card text), so add the site's real badge to `lotStatusSelectors` and, if its wording trips the fallback, tighten `soldTextPattern`. The harness's check 28 pins the "sold as one pallet" case, and the Node shim pins the badge cases. |
-| The **Active** column says "Active" on lots the site has sold | The marker is somewhere the profile does not look. Find the element that carries it in the **Page** panel and add its selector to `lotStatusSelectors` (or its attribute name to the list in `readCard`). Sold lots are only *flagged* — never dropped and never locked, so nothing is lost and nothing is off limits while you tune it. |
+| The **Active** column says "Active" on lots the site has sold | The marker is somewhere the profile does not look. Find the element that carries it on the auction page (the **info** glyph) and add its selector to `lotStatusSelectors` (or its attribute name to the list in `readCard`). Sold lots are only *flagged* — never dropped and never locked, so nothing is lost and nothing is off limits while you tune it. |
 | The table's columns do not line up under their headers | Should not be possible: the header and every row are laid out from one `ColumnWidths`, and the scroll content is re-keyed on the column choice. If a column still drifts, a cell is failing to hold its width — see deviation 23(d), where an empty cell is the usual culprit. Widths, not positions, are what the header and the rows share. |
-| "Automation ready" never logs | The page blocked main-frame injection or JavaScript. Open **Page** and inspect. |
-| Login never completes | Wrong form selectors, or a challenge screen. Open **Page** to see what the site is asking. |
+| "Automation ready" never logs | The page blocked main-frame injection or JavaScript. Open the auction page (the **info** glyph) and inspect. |
+| Login never completes | Wrong form selectors, or a challenge screen. Open the auction page (the **info** glyph) to see what the site is asking. |
 | A lot is skipped or failed | The provider returned an unusable reply, or images failed to download. The row shows the reason and the console has the detail. Press **Price** again on that row — a failure is per lot, not per run. |
-| A row's **Price** button is greyed out | The selected provider has no key (**the gear, ⌘, → API key** — the gear is dotted orange while that is the case), or the lot is already appraised. The footer's status line names which. Rows are also locked while a scrape or an all-lots batch is running — press **Stop**, or wait. |
+| A row's **Price** button is greyed out | The selected provider has no key (**Account, ⌘, → API key** — **Account** wears an orange dot while that is the case), or the lot is already appraised. The progress modal's status line names which. Rows are also locked while a scrape or an all-lots batch is running — press its **Stop**, or wait. |
 | A row's **Eval** button is greyed out | The same key gate as **Price**, or the lot already has an appraisal: a real valuation hides provisional figures, so evaluating it again would buy a number nothing shows. Use **Reset valuations** in the table menu first. |
-| A row has no **Open** button | The card declared no address for that lot, so there is nothing to open and no button to press. The address search has four sources (deviation 17): the anchors `detailLinkSelectors` names, the card's own first usable anchor, the anchor the matched card *lives inside*, and — once the lot number is known — any anchor whose address carries that number, on the card or anywhere on the page. So the usual fix is a shape the profile does not know: put the site's lot-page pattern in `detailLinkSelectors` and its furniture (sign-in, share, wish list) in `nonLotHrefPattern` in `ScrapeProfilePresets.genericBase()`. The log says how many rows came with an address: `Page 1 extracted: +24 row(s) …; 24/24 with a lot-page address` — `0/24` means every card was in the same shape, which is worth a look in the **Page** panel. |
+| A row has no **Open** button | The card declared no address for that lot, so there is nothing to open and no button to press. The address search has four sources (deviation 17): the anchors `detailLinkSelectors` names, the card's own first usable anchor, the anchor the matched card *lives inside*, and — once the lot number is known — any anchor whose address carries that number, on the card or anywhere on the page. So the usual fix is a shape the profile does not know: put the site's lot-page pattern in `detailLinkSelectors` and its furniture (sign-in, share, wish list) in `nonLotHrefPattern` in `ScrapeProfilePresets.genericBase()`. The log says how many rows came with an address: `Page 1 extracted: +24 row(s) …; 24/24 with a lot-page address` — `0/24` means every card was in the same shape, which is worth a look on the auction page (the **info** glyph). |
 | Nothing is appraised after a run | Expected: a run only scrapes now (deviation 12). Press **Eval** for a cheap text-only figure, **Price** to appraise a row from its photographs, or the two **…all** buttons to work through every lot that has nothing yet. |
 | The Lot / SKU column shows something like `ItemMain19002` | The card exposed no lot number of its own, so the app fell back to the `id` — and the wrapper rule did not recognize the site's prefix. Add the element that carries the number to `lotNumberSelectors` (or its attribute to `lotNumberAttributeCandidates`) in `ScrapeProfilePresets.genericBase()`, and add the site's id prefix to `lotNumberWrapperWords`. See deviation 18. |
 | `Eval all` says every lot already has a figure | Working as intended: lots with a valuation or an eval are skipped rather than evaluated again (deviation 17). **Reset valuations** in the table menu clears them if you want them priced again. |
-| The progress bar only fills part of the way on a scrape-only run | It does not any more — the bar measures the work in hand rather than a fixed share of it. While the walk runs it is pages read out of the pages this run was asked to read, so a 3-page run fills a third, two thirds, then all of it; a finished scrape is 100%, because the pages *were* the job. |
-| The progress bar jumps back to nearly empty when I start scanning | Expected, and deliberate: once lots are being appraised the bar measures *that* work instead — lots answered out of lots on the board — so it re-scales when the work changes rather than pretending a scan is a continuation of a walk. |
+| The progress bar only fills part of the way on a scrape-only run | It does not any more — the bar measures the work in hand rather than a fixed share of it. While the walk runs it is pages read out of the pages this run is *going to* read, so a 3-page run fills a third, two thirds, then all of it; a finished scrape is 100%, because the pages *were* the job. |
+| The pill says `page 1 of 4` when I asked for 1 page | Fixed: the denominator is the smaller of the **Pages** budget and the listing's own count, because a walk stops when the pagination runs out of pages. One page of a four-page catalogue is a one-page job, so both the pill and the bar say `page 1 of 1`. A budget *longer* than the listing reads as the listing's length (`page 2 of 4`), which is the same rule from the other side. |
+| A row's **Price** shows `Pricing Lot #19002` but the counters say `1 ok, 0 failed` of 100 | Correct, and the two are different questions. The pill counts the job the button asked for — one row, named, because that is whose figure is being bought; the counters line keeps speaking for the whole board, which is the tally the pill cannot show. Press **Price all** and the pill switches to that batch's own scope (`Pricing Lot #4 of 12`). |
+| The pill counts a batch (`Pricing Lot #3 of 12`) and never names a lot | Expected: in a batch the place in the job is what moves, and a board's lot numbers do not run from 1 — `Pricing Lot #19002 of 12` would read as a place that does not exist. A row's own button names its row instead (`Pricing Lot #19002`), and the step line under the counters carries the lot number whenever one is being read. |
+| The modal's step line says `photograph 7 of 12` and looks stuck | It is waiting on the provider: one request per photograph is what a thorough scan *is*, and the console timestamps each read (`Lot 142: photograph 7 of 12 read: 5 product group(s)`). Press **Eval** if you want a figure in seconds instead, or lower **Photos / scan** so fewer frames get the individual treatment. |
+| The bottom of the modal says `Lot #19002 · eval` | The money line speaks for the row in hand, and that row's figures are still the text-only eval's. A real valuation replaces them the moment the photographed pass lands — the row's own badge and its italic **Max bid** say the same thing. `Board` at that position instead means no row is in hand: nothing has been appraised yet, or the board has been cleared. |
+| The progress bar jumps back to nearly empty when I start scanning | It does not any more: the bar measures the work in hand, and a row's own **Eval** / **Price** is a one-row job, so it fills as that row is answered rather than re-scaling to the whole board. It still re-scales when the work changes — a walk's pages, then the rows of whatever appraisal was asked for — because those are genuinely different jobs. |
 | The progress bar spins instead of filling | The walk's total is genuinely unknown: **All pages** on a listing whose pagination reports no page count. An indeterminate bar is the honest answer, and the status pill prints `page 2 — all pages` so the position is still readable. Pick a page count in **Pages** if you would rather see a fraction. |
 | A row's items have no line under their names | Nothing legible was found on that lot's photographs — no barcode, no model number, no label worth quoting (deviation 26). That is a normal outcome for loose goods: the numbers are the model's, and they rest on what is visible. The console line `label reader read nothing legible on N photograph(s)` is the same statement. |
 | The item line under a name quotes a number that does not match the photograph | The label reader read something off a label in the gallery — often a freight or stock-room sticker rather than the packaging, which is why the prompt is told to ignore tracking labels when they do not match a product. Re-**Price** the row: the console prints the literal reads (`label reader read barcode(s) … · identifier(s) …`) so you can see which label produced it. |
@@ -1100,6 +1366,6 @@ when a card carries three links.
 | A scan sends *more* images than the lot has photographs, or prices the site's own banner | `lotPageGallerySelectors` is too loose for the site (a bare `[class*='slide' i]`, or a container that wraps the header as well as the gallery, or a class the site reuses for its own carousels). Tighten it to the element that holds the lot's photographs — deviating from *this* lot's gallery is what an appraisal is allowed to be wrong about. The reader already sends one address per photograph: each thumbnail's *opened* copy rather than the thumbnail, and one entry per photograph however many sizes the page prints. |
 | The log prints `the page data supplied N more photograph(s) than the gallery markup held` | Expected on a site whose thumbnail strip is built in JavaScript: the HTML the reader fetches holds the frame and an *empty* strip, and the other addresses came from the page's own data blob. They were taken because they share the lot's folder — the check that keeps the "recently viewed" rail out — so the count is the lot's photographs, not the page's images. Nothing to configure. |
 | An **Eval** reads the card's teaser rather than the full copy | `lotPageDescriptionSelectors` matched nothing on the lot page — the site keeps its copy somewhere the profile does not name, or serves it only to a signed-in session. Add the container (the block itself first, the column second) and re-**Eval**. |
-| The log says "the lot page could not be read" | The scan fell back to the card's thumbnails and the card's teaser. Usual causes: the page needed a login the session did not have, or the site served a challenge page. Open **Page** to see what the site is returning. A gallery built in JavaScript is not by itself the reason — its strip is read from the page's own data blob when the addresses share the gallery's folder (see the row above) — so this is a page the reader could not get at, not one it could not parse. |
+| The log says "the lot page could not be read" | The scan fell back to the card's thumbnails and the card's teaser. Usual causes: the page needed a login the session did not have, or the site served a challenge page. Open the auction page (the **info** glyph) to see what the site is returning. A gallery built in JavaScript is not by itself the reason — its strip is read from the page's own data blob when the addresses share the gallery's folder (see the row above) — so this is a page the reader could not get at, not one it could not parse. |
 | Rows show `empty model answer` on DeepSeek | JSON mode returned nothing even after the automatic re-ask (DeepSeek documents this failure mode). Re-run the lot; it is a per-call coin flip, not a configuration problem. |
 

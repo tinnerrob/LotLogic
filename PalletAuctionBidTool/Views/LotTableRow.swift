@@ -458,7 +458,7 @@ struct LotTableRow: View {
                     + "\(target.headroom.currencyWholeText) of room."
             )
         }
-        parts.append("The percentages are set in Run tuning.")
+        parts.append("The percentages are set in Run Tuning.")
         return parts.joined(separator: " ")
     }
 
@@ -843,7 +843,7 @@ struct DiscoveredItemRow: View {
     private var anchorHelp: String {
         "Anchor item: \(item.retailValue.currencyWholeText) of retail at \(item.confidenceLevel.rawValue) "
             + "confidence. Most of the pallet's value sits on this line, so it is the one to sanity-check "
-            + "before bidding. The threshold is set in Run tuning."
+            + "before bidding. The threshold is set in Run Tuning."
     }
 
     /// The line's marker: a star for an anchor, an elbow for everything shelved under it.

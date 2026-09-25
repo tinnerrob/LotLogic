@@ -79,8 +79,22 @@ struct ScrapedLot: Identifiable, Codable, Hashable, Sendable {
         return String(format: "AUTO-%08X", UInt32(truncatingIfNeeded: hash))
     }
 
-    /// Page + lot number; used to drop duplicates that appear on consecutive pages.
-    var dedupeKey: String { resolvedLotNumber }
+    /// What makes two cards the same lot: the lot's own page when the card exposed one, and only
+    /// otherwise the number.
+    ///
+    /// The address is the better key because it is the thing that is actually unique. Two cards that
+    /// print the same number but link to *different* pages are two lots — a number the site reuses, or
+    /// one the extractor inferred — and keying on the number alone retired the second, which is how a
+    /// hundred-lot board came back holding ninety-nine. The duplication this exists to catch is one
+    /// lot read twice as the walk crosses pages, and that lot has one page: walking a listing that
+    /// repeats a tile across a page boundary still yields one row. The query and the fragment are
+    /// dropped, so the same page linked two ways is still one page.
+    var dedupeKey: String {
+        guard let detailURLString, !detailURLString.isEmpty else { return "number:\(resolvedLotNumber)" }
+        guard let url = URL(string: detailURLString) else { return detailURLString }
+        let address = (url.host() ?? "") + url.path
+        return address.isEmpty ? detailURLString : address
+    }
 
     /// `true` when the card carried enough signal to be worth a Gemini call.
     var isAnalyzable: Bool {

@@ -31,6 +31,10 @@ extension ScrapeProfile {
                 "[class*='newsletter']", "[class*='cookie']", "[class*='pagination']"
             ],
             minimumCardTextLength: 12,
+            lotSignalAttributes: [
+                "data-lot-id", "data-lotnumber", "data-lot-number", "data-lot",
+                "data-item-id", "data-auction-id"
+            ],
             lotNumberAttributeCandidates: [
                 "data-lot-id", "data-lotnumber", "data-lot-number", "data-lot", "data-item-id",
                 "data-auction-id", "data-id"

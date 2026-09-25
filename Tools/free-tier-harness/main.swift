@@ -1316,6 +1316,48 @@ do {
     )
     check(wrappedCard.dedupeKey == plainCard.dedupeKey, "the wrapped and plain spellings of one lot are one lot", detail: "\(wrappedCard.dedupeKey) vs \(plainCard.dedupeKey)")
 
+    // The other half of the same rule, and the one that used to lose a lot. Two cards that print the
+    // same number but lead to *different* pages are two lots; keying on the number alone retired the
+    // second, which is how a board of 100 came back holding 99 with nothing in the log to say why.
+    let twinNumberA = ScrapedLot(
+        lotNumber: "19002",
+        title: "First lot printed as 19002",
+        rawDescription: "",
+        bidText: "",
+        imageURLStrings: [],
+        detailURLString: "https://example.test/auction/lot/19002",
+        sourcePage: 1
+    )
+    let twinNumberB = ScrapedLot(
+        lotNumber: "19002",
+        title: "Second lot printed as 19002",
+        rawDescription: "",
+        bidText: "",
+        imageURLStrings: [],
+        detailURLString: "https://example.test/auction/lot/19003",
+        sourcePage: 1
+    )
+    check(
+        twinNumberA.dedupeKey != twinNumberB.dedupeKey,
+        "two lots that print the same number on different pages are two lots",
+        detail: "\(twinNumberA.dedupeKey) vs \(twinNumberB.dedupeKey)"
+    )
+
+    let samePageLinkedTwoWays = ScrapedLot(
+        lotNumber: "19002",
+        title: "The same lot, linked again from page 2",
+        rawDescription: "",
+        bidText: "",
+        imageURLStrings: [],
+        detailURLString: "https://example.test/auction/lot/19002?ref=list&page=2",
+        sourcePage: 2
+    )
+    check(
+        twinNumberA.dedupeKey == samePageLinkedTwoWays.dedupeKey,
+        "and one lot page linked two ways is still one lot",
+        detail: "\(twinNumberA.dedupeKey) vs \(samePageLinkedTwoWays.dedupeKey)"
+    )
+
     let numberlessCard = ScrapedLot(
         lotNumber: "",
         title: "Assorted plumbing fittings",
@@ -2122,6 +2164,160 @@ do {
     check(lot.totalRetail == 500, "both line items reached the row's retail total", detail: "\(lot.totalRetail)")
     check(lot.totalResale == 220, "and its resale total", detail: "\(lot.totalResale)")
     check(lot.analysisState == .completed, "the row is left completed rather than mid-scan")
+}
+
+// MARK: - 36. The progress readout counts the job that was asked for
+
+/// Two numbers the modal's pill is built on, both of which were wrong in the same way: the denominator
+/// was something other than the work in hand. A run told to walk **1 page** reported "page 1 of 4"
+/// because the site's own pager said four, and a row's **Price** reported "0 of 100" because the board
+/// held a hundred rows. Neither reads as a bug from inside the app — both look like work in progress —
+/// which is why the two rules are pinned here.
+///
+/// The readout's *wording* is pinned with them, and its step and money types: the pill names a row
+/// (`Evaluating Lot #19002`) or counts a batch (`Pricing Lot #3 of 12`), the step line and the bar are
+/// driven one photograph at a time, and the bottom line speaks for the row in hand. All of it is values
+/// in `RunProgress.swift`, which is the only reason any of it can be checked without a browser.
+do {
+    print("36. The progress readout counts the work that was asked for, and watches it step by step")
+
+    // A one-page run of a four-page listing is a one-page job. This is the reported bug: the pill said
+    // "page 1 of 4" for a run that would never read past page one.
+    let onePageRun = PageWalkProgress.target(budget: 1, walksEveryPage: false, listingPages: 4)
+    check(onePageRun == 1, "a 1-page budget against a 4-page listing is a 1-page job",
+          detail: "\(onePageRun.map(String.init) ?? "nil")")
+    check(PageWalkProgress.text(page: 1, target: onePageRun) == "page 1 of 1",
+          "so the readout says page 1 of 1, not page 1 of 4",
+          detail: PageWalkProgress.text(page: 1, target: onePageRun))
+
+    // The other half of the same rule: a budget longer than the listing is the listing's length, because
+    // the walk stops when the pagination runs out of pages.
+    let longBudget = PageWalkProgress.target(budget: 10, walksEveryPage: false, listingPages: 4)
+    check(longBudget == 4, "a 10-page budget against a 4-page listing is a 4-page job", detail: "\(longBudget ?? -1)")
+    check(PageWalkProgress.text(page: 2, target: longBudget) == "page 2 of 4", "walking that one in order",
+          detail: PageWalkProgress.text(page: 2, target: longBudget))
+
+    // A site that has not reported a count leaves the budget alone, and **All pages** takes the site's
+    // count or nothing at all.
+    let unknown = PageWalkProgress.target(budget: 3, walksEveryPage: false, listingPages: nil)
+    check(unknown == 3, "a 3-page budget on a listing with no count is 3 pages", detail: "\(unknown ?? -1)")
+    check(PageWalkProgress.target(budget: 0, walksEveryPage: true, listingPages: 24) == 24,
+          "All pages on a 24-page listing is 24 pages")
+    check(PageWalkProgress.target(budget: 0, walksEveryPage: true, listingPages: nil) == nil,
+          "and All pages with no count has no denominator to print")
+    check(PageWalkProgress.text(page: 2, target: nil) == "page 2 — all pages",
+          "which the readout says in words rather than inventing a number",
+          detail: PageWalkProgress.text(page: 2, target: nil))
+
+    // The bar counts the page being read as well as the pages already read, so a one-page run creeps as
+    // the board fills instead of standing at nothing and then snapping to full.
+    check(PageWalkProgress.fraction(pagesRead: 0, pageRowsLanded: 0, pageRowsOnPage: 24, target: 1) == 0,
+          "a one-page walk starts at nothing")
+    check(PageWalkProgress.fraction(pagesRead: 0, pageRowsLanded: 12, pageRowsOnPage: 24, target: 1) == 0.5,
+          "and creeps with the page's own cards",
+          detail: String(describing: PageWalkProgress.fraction(pagesRead: 0, pageRowsLanded: 12, pageRowsOnPage: 24, target: 1)))
+    check(PageWalkProgress.fraction(pagesRead: 1, pageRowsLanded: 24, pageRowsOnPage: 24, target: 1) == 1,
+          "so when the page is read the walk is done")
+    check(PageWalkProgress.fraction(pagesRead: 1, pageRowsLanded: 0, pageRowsOnPage: 24, target: 3) == 1.0 / 3.0,
+          "a three-page walk stands a third of the way along after page one",
+          detail: String(describing: PageWalkProgress.fraction(pagesRead: 1, pageRowsLanded: 0, pageRowsOnPage: 24, target: 3)))
+    check(PageWalkProgress.fraction(pagesRead: 1, pageRowsLanded: 12, pageRowsOnPage: 24, target: 3) == 0.5,
+          "and adds the share of the page it is on to the pages it has read",
+          detail: String(describing: PageWalkProgress.fraction(pagesRead: 1, pageRowsLanded: 12, pageRowsOnPage: 24, target: 3)))
+    check(PageWalkProgress.fraction(pagesRead: 1, pageRowsLanded: 30, pageRowsOnPage: 24, target: 1) == 1,
+          "a page that under-reported its cards cannot push the bar past full")
+    check(PageWalkProgress.fraction(pagesRead: 2, pageRowsLanded: 3, pageRowsOnPage: 5, target: nil) == nil,
+          "and an All pages walk with no count still has no fraction to print")
+
+    // A row's button is a one-row job, whatever the board holds — the second half of the reported bug —
+    // and the pill names the row it was pressed on rather than counting rows nobody asked about.
+    let row = UUID()
+    let rowPrice = AppraisalJob(kind: .price, lotIDs: [row], isBatch: false)
+    let rowEval = AppraisalJob(kind: .eval, lotIDs: [row], isBatch: false)
+    check(rowPrice.text(.init(lotNumber: "19002", answered: 0)) == "Pricing Lot #19002",
+          "a row's Price names the lot it was pressed on",
+          detail: rowPrice.text(.init(lotNumber: "19002", answered: 0)))
+    check(rowEval.text(.init(lotNumber: "19002", answered: 1)) == "Evaluating Lot #19002",
+          "and a row's Eval names its own verb",
+          detail: rowEval.text(.init(lotNumber: "19002", answered: 1)))
+    check(rowPrice.text(.init(answered: 0)) == "Pricing 0 of 1",
+          "a row whose lot number is unknown still reports the job it covers",
+          detail: rowPrice.text(.init(answered: 0)))
+
+    // A batch counts its way through the rows the button was built for: the board's count is not the job
+    // when the board holds lots the button has decided to leave alone.
+    let batchEval = AppraisalJob(kind: .eval, lotIDs: (0..<40).map { _ in UUID() }, isBatch: true)
+    let batchPrice = AppraisalJob(kind: .price, lotIDs: (0..<12).map { _ in UUID() }, isBatch: true)
+    check(batchEval.text(.init(index: 4, answered: 3)) == "Evaluating Lot #4 of 40",
+          "Eval all counts its way through the pending set it covers",
+          detail: batchEval.text(.init(index: 4, answered: 3)))
+    check(batchPrice.text(.init(index: 3, answered: 2)) == "Pricing Lot #3 of 12",
+          "and so does Price all",
+          detail: batchPrice.text(.init(index: 3, answered: 2)))
+    check(batchPrice.text(.init(lotNumber: "19002", index: nil, answered: 2)) == "Pricing Lot #2 of 12",
+          "a batch's place is a position, never some board's lot number",
+          detail: batchPrice.text(.init(lotNumber: "19002", index: nil, answered: 2)))
+    check(batchPrice.text(.init(answered: 12)) == "Pricing Lot #12 of 12",
+          "with no row in hand the answered count is the same statement one row behind",
+          detail: batchPrice.text(.init(answered: 12)))
+    check(batchPrice.text(.init(index: 13, answered: 12)) == "Pricing Lot #12 of 12",
+          "and a place past the job cannot print of 12 on row 13",
+          detail: batchPrice.text(.init(index: 13, answered: 12)))
+    check(batchEval.isBatch && !rowEval.isBatch, "the batch flag, not the count, is what names the button")
+
+    // Clicking through several rows at once is allowed, so the second click joins the job in hand instead
+    // of re-pointing the readout at itself: two rows at work must not read as 1 of 1.
+    var joined = rowPrice
+    let secondRow = UUID()
+    joined.include(secondRow)
+    check(joined.count == 2, "a second Price click joins the job in hand", detail: "\(joined.count)")
+    check(joined.position(of: secondRow) == 2 && joined.position(of: row) == 1,
+          "and the rows keep the order they joined in, which is what a batch's place is read off")
+    check(joined.text(.init(lotNumber: "19002", index: 2, answered: 1)) == "Pricing Lot #19002",
+          "a joined row job still names its lot rather than counting rows",
+          detail: joined.text(.init(lotNumber: "19002", index: 2, answered: 1)))
+    check(joined.text(.init(answered: 1)) == "Pricing 1 of 2",
+          "while the count behind it knows there are two rows at work",
+          detail: joined.text(.init(answered: 1)))
+    check(joined.lotIDs.contains(secondRow) && joined.lotIDs.count == 2, "and covers both rows")
+    check(joined.position(of: UUID()) == nil, "a row outside the job has no place in it")
+
+    // The readout's step: what the modal prints while a row is mid-appraisal, and the share of that row
+    // the bar counts. One update per photograph is the whole point — a scan is a dozen requests, and a bar
+    // that only moved when a row landed said "nothing is happening" for minutes at a time.
+    check(AppraisalStep.readingPage.phrase == "reading the lot's own page",
+          "a row's first step is its own page", detail: AppraisalStep.readingPage.phrase)
+    check(AppraisalStep.photograph(index: 5, of: 12).phrase == "photograph 5 of 12",
+          "a scan names the photograph it is on", detail: AppraisalStep.photograph(index: 5, of: 12).phrase)
+    check(AppraisalStep.reconciling(readings: 12).phrase == "reconciling 12 reading(s) into the line items",
+          "and the reconciliation that closes it out",
+          detail: AppraisalStep.reconciling(readings: 12).phrase)
+    let ladder = [
+        AppraisalStep.readingPage.share,
+        AppraisalStep.evaluatingText.share,
+        AppraisalStep.photograph(index: 1, of: 12).share,
+        AppraisalStep.photograph(index: 12, of: 12).share,
+        AppraisalStep.reconciling(readings: 12).share
+    ]
+    check(zip(ladder, ladder.dropFirst()).allSatisfy { $0 < $1 }, "the steps fill the bar in order",
+          detail: ladder.map { String(format: "%.2f", $0) }.joined(separator: " < "))
+    check(ladder.allSatisfy { $0 > 0 && $0 < 1 }, "and none of them is a whole row: only an answer is",
+          detail: ladder.map { String(format: "%.2f", $0) }.joined(separator: ", "))
+    check(AppraisalStep.photograph(index: 40, of: 3).share < 1,
+          "a photograph past its own gallery still cannot claim the row")
+    check(AppraisalStep(PhotoScanEvent.read(index: 3, of: 12, objects: 2)) == .photograph(index: 3, of: 12),
+          "a scan's own report maps onto the readout's step")
+    check(AppraisalStep(PhotoScanEvent.aggregating(photographs: 12, leftovers: 0)) == .reconciling(readings: 12),
+          "and so does its reconciliation")
+    check(AppraisalStep(PhotoScanEvent.aggregated(items: 4)) == nil,
+          "while a reconciliation that landed starts no step of its own")
+    check(AppraisalStep(PhotoScanEvent.fallingBack(reason: "no readings")) == .wholeGallery,
+          "the single-pass fallback is a step too")
+
+    // The modal's bottom line speaks for the row in hand: `Retail` there is that row's own figure, and the
+    // difference between what it resells for and what is bid on it is the one number the line derives.
+    check(LotMoney(currentBid: 75, retail: 420, resale: 310, provisional: true).profit == 235,
+          "the money line's profit is the row's own resale over its current bid")
 }
 
 print(tally.value == 0 ? "\nALL CHECKS PASSED" : "\n\(tally.value) CHECK(S) FAILED")

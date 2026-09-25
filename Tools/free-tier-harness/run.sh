@@ -24,6 +24,7 @@ swiftc -swift-version 6 -o "$out/harness" \
     "$root/PalletAuctionBidTool/Models/LotSearch.swift" \
     "$root/PalletAuctionBidTool/Models/LotSort.swift" \
     "$root/PalletAuctionBidTool/Models/PaginationPlan.swift" \
+    "$root/PalletAuctionBidTool/Models/RunProgress.swift" \
     "$root/PalletAuctionBidTool/Models/ScrapeProfile.swift" \
     "$root/PalletAuctionBidTool/Models/ScrapeProfilePresets.swift" \
     "$root/PalletAuctionBidTool/Models/ValuationProvider.swift" \

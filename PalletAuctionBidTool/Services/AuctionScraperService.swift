@@ -45,7 +45,16 @@ struct ScraperCredentials: Sendable, Equatable {
 enum ScraperEvent: Sendable {
     case status(String)
     case pageStarted(page: Int, limit: Int, lotsSoFar: Int)
-    case pageExtracted(page: Int, lots: [ScrapedLot], runningTotal: Int)
+    /// One new row, as the app puts it on the board: the page it came off, its 1-based place among that
+    /// page's new cards, and the card itself.
+    ///
+    /// One event per row rather than one per page because a page's cards come back in a single payload:
+    /// what this counts is the *board filling* — a row at a time, which is what the progress readout and
+    /// the table show — and not the site being read card by card, which it is not.
+    case lotExtracted(page: Int, index: Int, of: Int, lot: ScrapedLot)
+    /// One page's cards have been read: how many the page showed, how many were new, how many of the page's
+    /// cards named a lot page of their own, and how many rows the board holds now.
+    case pageExtracted(page: Int, cards: Int, newLots: Int, linked: Int, runningTotal: Int)
     /// How long the listing is, as the listing itself renders it (see `PaginationReport`). Reported
     /// once per run, after the first page's cards are up.
     case pagination(PaginationReport)
@@ -555,6 +564,13 @@ extension AuctionScraperService {
 
 extension AuctionScraperService {
 
+    /// How long the walk pauses between the rows of one page.
+    ///
+    /// Long enough for the table to draw a row before the next one lands, short enough that a
+    /// hundred-lot page costs a third of a second: the pause is what makes the board fill a row at a
+    /// time rather than arriving in a block (see `.lotExtracted`).
+    private static let rowReportPause = Duration.milliseconds(4)
+
     /// Loads `startURL`, optionally logs in, then walks result pages.
     ///
     /// The walk is **by address**: page 2 is the run's address carrying `?page=2`, page 3 carries
@@ -662,7 +678,26 @@ extension AuctionScraperService {
             let newLots = report.lots.filter { seenKeys.insert($0.dedupeKey).inserted }
             collected.append(contentsOf: newLots)
             log("Page \(page): \(report.cardCount) cards via \(report.selector ?? "no selector"), \(newLots.count) new")
-            emit(.pageExtracted(page: page, lots: report.lots, runningTotal: collected.count))
+            reportCardAccounting(forPage: page, report: report, newCount: newLots.count)
+
+            // The rows go over one at a time, so the board fills visibly: the readout's lot count and the
+            // table both move per row. The pause is one frame's worth — enough for the row to be drawn
+            // before the next one lands, short enough that a hundred-lot page costs a third of a second —
+            // and it paces nothing else: the next page's request is not delayed by it beyond that.
+            for (index, lot) in newLots.enumerated() {
+                emit(.lotExtracted(page: page, index: index + 1, of: newLots.count, lot: lot))
+                try? await Task.sleep(for: Self.rowReportPause)
+            }
+
+            emit(
+                .pageExtracted(
+                    page: page,
+                    cards: report.lots.count,
+                    newLots: newLots.count,
+                    linked: report.lots.count { $0.detailURLString != nil },
+                    runningTotal: collected.count
+                )
+            )
 
             // A page whose fingerprint has already been read is not this page at all: the number in the
             // address was ignored, clamped or redirected away. Clicking the site's own control is the
@@ -688,6 +723,31 @@ extension AuctionScraperService {
 
         log("Scrape finished — \(collected.count) unique lot(s)")
         return collected
+    }
+
+    /// Names, in the console, every card on a page that did not become a row.
+    ///
+    /// Two rules can retire one, and both used to do it in silence: a card nothing readable was on,
+    /// and a card that turned out to be a lot already on the board. A board that came back one short
+    /// of the listing was therefore impossible to explain from the log — the numbers on screen simply
+    /// did not count the same things. Each is now counted out loud, so a shortfall has a name instead
+    /// of being a mystery, and the two causes want opposite fixes: widen the card selectors, or stop
+    /// two different lots resolving to one identity.
+    private func reportCardAccounting(forPage page: Int, report: ExtractionReport, newCount: Int) {
+        let unreadable = report.cardCount - report.lots.count
+        if unreadable > 0 {
+            log(
+                "Page \(page): \(unreadable) of \(report.cardCount) card(s) yielded no lot — "
+                    + "nothing readable was on them"
+            )
+        }
+        let repeats = report.lots.count - newCount
+        if repeats > 0 {
+            log(
+                "Page \(page): \(repeats) card(s) were lots already on the board — "
+                    + "the same lot page read twice, or a page served twice"
+            )
+        }
     }
 
     /// Snapshot of the current document: card count, login state, next-control availability.

@@ -15,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "5D40117530656EC90036E299"
-               BuildableName = "PalletAuctionBidTool.app"
+               BuildableName = "TheLotLizard.app"
                BlueprintName = "PalletAuctionBidTool"
                ReferencedContainer = "container:PalletAuctionBidTool.xcodeproj">
             </BuildableReference>
@@ -45,7 +45,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "5D40117530656EC90036E299"
-            BuildableName = "PalletAuctionBidTool.app"
+            BuildableName = "TheLotLizard.app"
             BlueprintName = "PalletAuctionBidTool"
             ReferencedContainer = "container:PalletAuctionBidTool.xcodeproj">
          </BuildableReference>
@@ -62,7 +62,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "5D40117530656EC90036E299"
-            BuildableName = "PalletAuctionBidTool.app"
+            BuildableName = "TheLotLizard.app"
             BlueprintName = "PalletAuctionBidTool"
             ReferencedContainer = "container:PalletAuctionBidTool.xcodeproj">
          </BuildableReference>
