@@ -724,7 +724,11 @@ enum LotValuationPrompt {
     photographs — it names an exact product in an exact size, which is a market price rather \
     than a guess — so zoom in on packaging and shelf tickets, and record in `evidence` which of \
     the reads the figure rests on. A partly legible label is still worth reading: report what \
-    you could make out and mark the line Med.
+    you could make out and mark the line Med. Price the most exactly identified thing you can: a \
+    barcode or model/part number beats a brand with a product name and size, which beats a brand \
+    and a category, which beats the category alone. A generic price for a specific product is the \
+    wrong price — name what you identified in `name`, and leave `name` at the category only when \
+    nothing more specific was readable.
     3. When the app has already run its own text and barcode reader over these same photographs, \
     its output is a verified reading rather than a hint. Match each entry to the product it \
     belongs to, price that exact model and size, and raise the line to High confidence when one \

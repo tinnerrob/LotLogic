@@ -1590,6 +1590,83 @@ do {
     check(enriched.imageURLs.count == 4, "a page's gallery replaces the card's thumbnails", detail: "\(enriched.imageURLs.count)")
     check(enriched.lotNumber == imageSubject.lotNumber && enriched.rawDescription == imageSubject.rawDescription,
           "without touching the listing text the prompt is built from")
+
+    // The other half of what a lot page carries: its description. A card only ever teasers it, so the
+    // page's copy is what the prompt must be built from — and, exactly as with the images, an empty
+    // answer leaves the card's text standing rather than blanking what the row is showing.
+    check(imageSubject.withDescription("") == imageSubject,
+          "a page with no description leaves the card's copy alone")
+    check(imageSubject.withDescription("   \n\t ") == imageSubject,
+          "and so does one that is only whitespace")
+    let described = imageSubject.withDescription(
+        "Pallet of 40 returned kitchen appliances,\n  6x Ninja BL610 blenders, UPC 622356528163."
+    )
+    check(described.rawDescription == "Pallet of 40 returned kitchen appliances, 6x Ninja BL610 blenders, UPC 622356528163.",
+          "the page's description replaces the card's teaser, whitespace condensed",
+          detail: described.rawDescription)
+    check(described.imageURLs == imageSubject.imageURLs && described.currentBid == imageSubject.currentBid,
+          "without touching the card's photographs or its bid")
+
+    // Both asks are built from that one subject, so the page's copy has to reach the prompt the model
+    // actually sees — the cheap text-only pass as much as the photographed one.
+    let listingText = LotValuationPrompt.listingText(for: described)
+    check(listingText.contains("Ninja BL610") && listingText.contains("622356528163"),
+          "the page's description reaches the listing text both passes are built from",
+          detail: listingText)
+    check(!listingText.contains(imageSubject.rawDescription),
+          "and the card's teaser is not left in it as well", detail: listingText)
+
+    // The row side of the same rule: the column the expanded row shows is the page's copy once it has
+    // been read, and a later read that yields nothing cannot blank it.
+    let row = makeLot("208", bid: 640)
+    check(row.applyLotPageDescription("Pallet of 40 returned kitchen appliances, 6x Ninja BL610 blenders."),
+          "a row takes the page's description")
+    check(row.rawDescription.contains("Ninja BL610"), "and the row's own copy is what changed",
+          detail: row.rawDescription)
+    check(!row.applyLotPageDescription(""), "an empty description changes nothing")
+    check(!row.applyLotPageDescription(row.rawDescription), "and neither does the same text again")
+    check(row.rawDescription.contains("Ninja BL610"), "so the page's copy is still what the row shows",
+          detail: row.rawDescription)
+
+    // The containers the page-side reader is scoped to, and the shape it can read them in. The frame is
+    // named first because that is where the lot's photographs are; the strip is named as well in case a
+    // layout moves it out of the column; and nothing else on the page is named at all — the site reuses
+    // `auc_slide` for its own carousels, and a rail of neighbouring lots read as this lot's gallery is
+    // how a lot with eight photographs became a scan of seventeen.
+    let reader = ScrapeProfile.genericBase()
+    check(reader.lotPageGallerySelectors.first == "div.auc_slide.left",
+          "the gallery is scoped to the lot's own slide column",
+          detail: reader.lotPageGallerySelectors.first ?? "none")
+    check(reader.lotPageGallerySelectors.contains("ul.mediaThumbnails"),
+          "and to the thumbnail strip, in case a layout puts it elsewhere")
+    check(!reader.lotPageGallerySelectors.contains("div.auc_slide"),
+          "while the class the site also uses for its own carousels is not a gallery rule",
+          detail: reader.lotPageGallerySelectors.joined(separator: ", "))
+    // The attributes a thumbnail strip hides its full-size copies in. On this catalogue a strip item is
+    // `<a href="…_xl.jpg" data-image="…_l.jpg"><img src="…_s.jpg">`, so the anchor's own `href` (read by
+    // the page-side script) plus these three are the whole of what carries a photograph; dropping one
+    // would silently send a 56×100 crop to a vision model.
+    let imageAttributes = Set(reader.imageAttributeCandidates)
+    check(["src", "data-image", "data-zoom-image", "data-large_image"].allSatisfy(imageAttributes.contains),
+          "the profile reads every attribute a strip uses for its full-size copy",
+          detail: reader.imageAttributeCandidates.joined(separator: ", "))
+    check(reader.lotPageDescriptionSelectors.first == "div.active.ins_cnt.description-info-content",
+          "the description block is named ahead of the column that contains it",
+          detail: reader.lotPageDescriptionSelectors.first ?? "none")
+    // Compound selectors only: Tools/scraper-js-check models no descendant combinators, so a container
+    // rule written as one would be a rule nothing drives.
+    func isCompound(_ selector: String) -> Bool {
+        let outsideBrackets = selector.replacingOccurrences(
+            of: "\\[[^\\]]*\\]",
+            with: "",
+            options: .regularExpression
+        )
+        return !outsideBrackets.contains(" ") && !outsideBrackets.contains(">")
+    }
+    let containerRules = reader.lotPageGallerySelectors + reader.lotPageDescriptionSelectors
+    check(containerRules.allSatisfy(isCompound),
+          "every container rule is a compound selector, so the page-side check can drive it",
+          detail: containerRules.joined(separator: ", "))
 }
 
 // MARK: - 31. The address a row opens
@@ -1768,6 +1845,31 @@ do {
     check(LotValuationPrompt.systemInstruction.contains("barcode")
             && LotValuationPrompt.systemInstruction.contains("`evidence`"),
           "the photograph rules tell the model to read labels and to say what it priced from")
+
+    // The price a pallet is worth turns on *which* product was identified: a barcode names one model,
+    // "household goods" names a category, and the two are not the same money. Both asks therefore state
+    // the same preference ladder, so the cheap pass and the photographed one cannot drift apart.
+    for (name, rules) in [
+        ("the photographed pass", LotValuationPrompt.systemInstruction),
+        ("the per-photograph reader", LotPhotoScanPrompt.readingSystemInstruction)
+    ] {
+        let ladder = rules.lowercased()
+        check(ladder.contains("most exactly identified"),
+              "\(name) prices the most exactly identified product rather than its category")
+        check(ladder.contains("barcode or model") && ladder.contains("which beats a brand")
+                && ladder.contains("which beats the category"),
+              "\(name) states the ladder: barcode or model, then brand and size, then brand, then category")
+        check(ladder.contains("wrong price"),
+              "\(name) says why: a generic price for a specific product is the wrong one")
+    }
+    // The cheap pass has no photographs, so it can only ever price the name it is given: what the page's
+    // description now supplies — brands, model numbers, counts, condition — is exactly what it is told
+    // to reason from.
+    let cheap = LotValuationPrompt.prePriceSystemInstruction.lowercased()
+    check(cheap.contains("brands, model numbers, counts and condition"),
+          "the text-only pass is told to reason from brands, model numbers, counts and condition")
+    check(cheap.contains("extrapolate from the category when the wording is thin"),
+          "and to fall back to the category only when that wording is thin")
 
     // The answer side: `evidence` has to survive the tolerant decode onto the row.
     do {
@@ -1957,6 +2059,69 @@ do {
         tally.bump()
         print("  FAIL  unexpected error: \(error)")
     }
+}
+
+// MARK: - 35. The valuation reaches the row on the main actor
+
+/// The crash this guards against: a scan's task body is written inside a `@MainActor` class, but a
+/// task that is handed back to a cooperative thread after an `await` and then calls
+/// `LotItem.applyValuation` *synchronously* trips that method's own main-queue check
+/// (`dispatch_assert_queue`) instead of applying anything — an `EXC_BREAKPOINT` inside the app, not a
+/// compile error. `AnalysisCoordinator` now hands every task's result over through `MainActor.run`
+/// (see `onMainActor`), so this is the shape that has to hold: a valuation that arrives from a
+/// cooperative thread still lands on the main actor, and the row keeps its figures.
+do {
+    print("35. A valuation reached from a cooperative thread is applied on the main actor")
+
+    let lot = LotItem(
+        lotNumber: "142",
+        currentBid: 210,
+        rawDescription: "Mixed lot, 60 pieces.",
+        imageUrls: [],
+        title: "Pallet of returned general merchandise"
+    )
+    let outcome = ValuationOutcome(
+        items: [
+            DiscoveredItem(
+                itemName: "AA batteries, 12x 2-pack",
+                confidence: "High",
+                retailValue: 420,
+                resaleValue: 180
+            ),
+            DiscoveredItem(
+                itemName: "AA batteries, 24-pack",
+                confidence: "Med",
+                retailValue: 80,
+                resaleValue: 40
+            )
+        ],
+        imagesSent: 2,
+        modelID: "gemini-2.5-flash",
+        passes: 2
+    )
+
+    // A detached task runs on the cooperative pool — the thread a scan's task can be handed back to
+    // after an `await`, and the one whose synchronous call into the row trips the row's own check.
+    // (That call does not even compile under Swift 6: the runtime check that traps is the same
+    // isolation the compiler enforces. The hop is what keeps the call legal *and* correct.)
+    let arrivedOffMain = await Task.detached { () -> Bool in
+        let wasOffMain = pthread_main_np() == 0
+        await MainActor.run {
+            lot.applyValuation(
+                outcome.items,
+                imagesAnalyzed: outcome.imagesSent,
+                passes: outcome.passes,
+                readings: outcome.readings
+            )
+        }
+        return wasOffMain
+    }.value
+
+    check(arrivedOffMain, "the task applying it was on a cooperative thread, not the main thread")
+    check(pthread_main_np() != 0, "the apply happened on the main actor")
+    check(lot.totalRetail == 500, "both line items reached the row's retail total", detail: "\(lot.totalRetail)")
+    check(lot.totalResale == 220, "and its resale total", detail: "\(lot.totalResale)")
+    check(lot.analysisState == .completed, "the row is left completed rather than mid-scan")
 }
 
 print(tally.value == 0 ? "\nALL CHECKS PASSED" : "\n\(tally.value) CHECK(S) FAILED")

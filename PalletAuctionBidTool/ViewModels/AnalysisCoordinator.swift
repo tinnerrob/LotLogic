@@ -118,6 +118,17 @@ final class AnalysisCoordinator {
     /// The batch started by the table's **Eval all** button.
     private var prePriceBatchTask: Task<Void, Never>?
 
+    /// Lot pages already read in this run, keyed by lot: the gallery *and* the description the page
+    /// carried (see `subjectForLotPage`).
+    ///
+    /// The page is read at most **once per lot per action**, because the two things it is read for —
+    /// the photographs a scan appraises from, and the listing's own description that both passes build
+    /// their prompt from — are wanted first by the cheap pass and then by the photographed one, and a
+    /// second GET would buy nothing. Entries are dropped when an action starts for that lot and when a
+    /// run is reset, so a retry re-reads the page rather than reusing a gallery from an earlier
+    /// attempt.
+    private var lotPageSubjects: [UUID: ValuationSubject] = [:]
+
     /// Set when **Stop** cancelled a scan, so the closing status line says "stopped" rather than
     /// "finished".
     private var scansWereStopped = false
@@ -432,7 +443,7 @@ final class AnalysisCoordinator {
             )
         }
 
-        runTask = Task { [settings] in
+        runTask = Task { @MainActor [settings] in
             await self.execute(url: url, settings: settings)
         }
     }
@@ -474,6 +485,7 @@ final class AnalysisCoordinator {
     private func resetRunState() {
         lots.removeAll()
         seenLotKeys.removeAll()
+        lotPageSubjects.removeAll()
         pagesExtracted = 0
         valuedCount = 0
         failedCount = 0
@@ -644,6 +656,25 @@ final class AnalysisCoordinator {
         phase == .scraping || scanBatchTask != nil || prePriceBatchTask != nil
     }
 
+    /// Hands a task's result back to the main actor, whatever thread that task last resumed on.
+    ///
+    /// A `Task { [weak self] in … }` written inside this class reads as if it ran on the main actor,
+    /// and at the top it does: the body is compiled against this class's isolation and its first
+    /// statement runs there. What the type system cannot promise is where the body *resumes* after an
+    /// `await` — the continuing statements run on whatever executor the runtime returns the task to,
+    /// and a synchronous call into a main-queue-only path from a cooperative thread does not apply
+    /// anything: it trips `dispatch_assert_queue` inside the callee's own isolation check, which is an
+    /// `EXC_BREAKPOINT` inside the app rather than a compile error.
+    ///
+    /// `LotItem.applyValuation` is exactly such a path — the row's totals and its items are written
+    /// under `@MainActor` — so every task below hands its result over through this hop instead of
+    /// calling `finishScan`/`finishPrePrice`/… directly. The hop costs one suspension at a point where
+    /// the work was already asynchronous, and it buys the one thing the task bodies were assuming:
+    /// that the row is touched on the main actor, by construction rather than by convention.
+    private nonisolated func onMainActor(_ body: @MainActor @Sendable () -> Void) async {
+        await MainActor.run(body: body)
+    }
+
     /// Appraises one lot on demand — what a row's **Price** button calls.
     ///
     /// Nothing is scheduled in advance any more: the operator picks the lots and each scan lands in
@@ -658,6 +689,9 @@ final class AnalysisCoordinator {
 
         let service = makeValuationService(settings, scanReporter(for: lot))
         let card = lot.valuationSubject
+        // A fresh click re-reads the lot's page: the gallery on it may have changed since the last
+        // attempt, and a row that failed a moment ago is exactly the row worth retrying.
+        lotPageSubjects[lot.id] = nil
 
         lot.markAnalyzing()
         phase = .valuing
@@ -667,15 +701,16 @@ final class AnalysisCoordinator {
                 + "\(settings.activeModelID), \(settings.photoScanSummary) on its lot page"
         )
 
-        scanTasks[lot.id] = Task { [weak self] in
-            // The cheap text-only first look, when it is switched on: the row shows a provisional
-            // figure while the photographed pass is still being paid for. It needs no photographs, so
-            // it starts on the card's copy of the listing while the lot page is being read.
-            await self?.runPrePrice(lot, subject: card, using: service, automatic: true)
+        scanTasks[lot.id] = Task { @MainActor [weak self] in
+            // The lot's own page is read first, and both passes are built from it — see
+            // `subjectForLotPage`. A page that will not read is not a failure: the card's thumbnails
+            // and its teaser stand in, and the log says so (deviation 24).
+            let subject = await self?.subjectForLotPage(lot) ?? card
 
-            // The lot's own page decides how many photographs travel — see deviation 24. A page that
-            // will not read is not a failure: the card's thumbnails stand in, and the log says so.
-            let subject = await self?.subjectForScanning(lot) ?? card
+            // The cheap text-only first look: the row shows a provisional figure while the
+            // photographed pass is still being paid for. It sends no photographs, but it reads the
+            // same description the scan will — the page's copy, not the card's teaser.
+            await self?.runPrePrice(lot, subject: subject, using: service, automatic: true)
 
             let result: Result<ValuationOutcome, Error>
             do {
@@ -684,22 +719,28 @@ final class AnalysisCoordinator {
                 result = .failure(error)
             }
             guard let self else { return }
-            self.finishScan(of: lot, with: result)
+            // Through the hop rather than called here: see `onMainActor`.
+            await self.onMainActor { self.finishScan(of: lot, with: result) }
         }
     }
 
     // MARK: - Lot pages
 
-    /// The subject a scan should be made from: the lot's own page when it can be read, the card's
-    /// thumbnails when it cannot.
+    /// The subject a pass should be made from: the lot's own page when it can be read — its gallery
+    /// **and** its description — and the card alone when it cannot.
     ///
-    /// A lot card only carries a thumbnail or two, so the page is where the photographs actually
-    /// are — and how many there are varies per lot, which is exactly why the app asks the page
-    /// instead of the operator (deviation 24). The page is read through the listing the scraper
-    /// already has loaded, so the request carries the login session and the results page never
-    /// moves; the whole path is best-effort, because a scan must not fail over a page that will not
-    /// read.
-    private func subjectForScanning(_ lot: LotItem) async -> ValuationSubject {
+    /// A lot card only carries a thumbnail or two and a teaser ("Pallet of General Merchandise"), so
+    /// the page is where the photographs actually are and where the listing's real copy is. How many
+    /// photographs there are varies per lot, which is exactly why the app asks the page instead of the
+    /// operator (deviation 24). The page is read through the listing the scraper already has loaded, so
+    /// the request carries the login session and the results page never moves; the whole path is
+    /// best-effort, because a scan must not fail over a page that will not read.
+    ///
+    /// Read once per lot per action and remembered in `lotPageSubjects`: the cheap pass and the
+    /// photographed pass want the same two things, and a second GET would buy nothing.
+    private func subjectForLotPage(_ lot: LotItem) async -> ValuationSubject {
+        if let cached = lotPageSubjects[lot.id] { return cached }
+
         let card = lot.valuationSubject
         guard let detailURL = lot.detailURL else { return card }
         // No scraper, or one that has never loaded a page: there is no session to read the lot page
@@ -711,7 +752,7 @@ final class AnalysisCoordinator {
 
         do {
             let report = try await scraper.lotPageImages(for: detailURL)
-            guard report.ok, !report.imageURLs.isEmpty else {
+            guard report.ok else {
                 log(
                     "Lot \(lot.lotNumber): \(report.summary) — scanning the card's "
                         + "\(card.imageURLs.count) thumbnail(s) instead",
@@ -719,8 +760,28 @@ final class AnalysisCoordinator {
                 )
                 return card
             }
+
+            // Description first, then photographs, so the recorded copy and the subject agree.
+            lot.applyLotPageDescription(report.description ?? "")
+            let subject = card
+                .withDescription(report.description ?? "")
+                .withImages(report.imageURLs)
+
+            // A page that read but carried neither thing worth having leaves the card alone, and says
+            // so — otherwise the log would read as if the page had contributed something. The card is
+            // still remembered, so the second pass does not fetch the same page again for nothing.
+            guard subject != card else {
+                log(
+                    "Lot \(lot.lotNumber): \(report.summary) — nothing the card did not already have",
+                    source: .scraper
+                )
+                lotPageSubjects[lot.id] = card
+                return card
+            }
+
             log("Lot \(lot.lotNumber): \(report.summary)", source: .scraper)
-            return card.withImages(report.imageURLs)
+            lotPageSubjects[lot.id] = subject
+            return subject
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             log(
@@ -754,17 +815,21 @@ final class AnalysisCoordinator {
         scansWereStopped = false
 
         let service = makeValuationService(settings, { _ in })
-        let subject = lot.valuationSubject
+        let card = lot.valuationSubject
+        lotPageSubjects[lot.id] = nil
 
         lot.markPrePricing()
         phase = .valuing
         statusText = "Evaluating lot \(lot.lotNumber) from its listing text"
         log(
             "Evaluating lot \(lot.lotNumber) — \(settings.provider.displayName) "
-                + "\(settings.activeModelID), listing text only (no images sent)"
+                + "\(settings.activeModelID), the listing's own description (no images sent)"
         )
 
-        prePriceTasks[lot.id] = Task { [weak self] in
+        prePriceTasks[lot.id] = Task { @MainActor [weak self] in
+            // The lot's page is read for its description too: a text-only estimate is only worth
+            // anything if it is built from the listing's real copy rather than the card's teaser.
+            let subject = await self?.subjectForLotPage(lot) ?? card
             let result: Result<PrePriceEstimate, Error>
             do {
                 result = .success(try await service.prePrice(subject: subject))
@@ -772,7 +837,7 @@ final class AnalysisCoordinator {
                 result = .failure(error)
             }
             guard let self else { return }
-            self.finishPrePrice(of: lot, with: result)
+            await self.onMainActor { self.finishPrePrice(of: lot, with: result) }
         }
     }
 
@@ -795,18 +860,25 @@ final class AnalysisCoordinator {
         scansWereStopped = false
         phase = .valuing
         statusText = "Evaluating \(targets.count) lot(s) from their listing text"
+        // A fresh batch re-reads every lot's page: the descriptions are what makes the text-only pass
+        // worth paying for, and a page read during an earlier attempt must not stand in for this one.
+        lotPageSubjects.removeAll()
         log(
             "Evaluating \(targets.count) lot(s) with \(settings.provider.displayName) "
-                + "\(settings.activeModelID) — no images, \(AppSettings.batchConcurrency) at a time"
+                + "\(settings.activeModelID) — each lot's own description, no images, "
+                + "\(AppSettings.batchConcurrency) at a time"
                 + pacingSuffix(for: settings)
         )
 
         let service = makeValuationService(settings, { _ in })
         let concurrency = AppSettings.batchConcurrency
-        prePriceBatchTask = Task { [weak self] in
+        prePriceBatchTask = Task { @MainActor [weak self] in
             await self?.prePrice(targets, using: service, concurrency: concurrency, automatic: false)
             guard let self else { return }
-            self.finishPrePriceBatch(stopped: Task.isCancelled || self.scansWereStopped)
+            // Asked here rather than inside the hop below: `Task.isCancelled` answers for whichever
+            // task asks, and the answer that matters belongs to this one.
+            let cancelled = Task.isCancelled
+            await self.onMainActor { self.finishPrePriceBatch(stopped: cancelled || self.scansWereStopped) }
         }
     }
 
@@ -914,6 +986,8 @@ final class AnalysisCoordinator {
         scansWereStopped = false
         phase = .valuing
         statusText = "Appraising \(targets.count) lot(s) with \(settings.activeModelID)"
+        // A fresh batch re-reads every lot's page rather than reusing galleries from an earlier run.
+        lotPageSubjects.removeAll()
         log(
             "Scanning \(targets.count) unvalued lot(s) with \(settings.provider.displayName) "
                 + "\(settings.activeModelID), \(settings.photoScanSummary) on each lot page, "
@@ -922,10 +996,12 @@ final class AnalysisCoordinator {
 
         let service = makeValuationService(settings, batchScanReporter())
         let concurrency = AppSettings.batchConcurrency
-        scanBatchTask = Task { [weak self] in
+        scanBatchTask = Task { @MainActor [weak self] in
             await self?.valuate(targets, using: service, concurrency: concurrency)
             guard let self else { return }
-            self.finishBatch(stopped: Task.isCancelled || self.scansWereStopped)
+            // As above in `prePriceUnvalued`: this task's own cancellation is what closes the batch.
+            let cancelled = Task.isCancelled
+            await self.onMainActor { self.finishBatch(stopped: cancelled || self.scansWereStopped) }
         }
     }
 
@@ -1004,7 +1080,7 @@ final class AnalysisCoordinator {
                 // One lot page is read per lot, here, in the queueing loop: the GET overlaps the
                 // model calls already in flight rather than delaying the batch by a serial pass over
                 // every lot's page before the first request goes out.
-                let subject = await subjectForScanning(lot)
+                let subject = await subjectForLotPage(lot)
                 group.addTask {
                     do {
                         return (index, .success(try await service.value(subject: subject)))
@@ -1044,20 +1120,23 @@ final class AnalysisCoordinator {
         let pending = targets.filter { !$0.hasValuation && !$0.isPrePriced && !$0.isPrePricing }
         guard !pending.isEmpty else { return }
 
-        log("Evaluating \(pending.count) lot(s) from their listing text before pricing them")
+        log("Evaluating \(pending.count) lot(s) from their own description before pricing them")
         pending.forEach { $0.markPrePricing() }
 
-        let subjects = pending.map(\.valuationSubject)
         let width = min(max(concurrency, 1), max(pending.count, 1))
 
         await withTaskGroup(of: (Int, Result<PrePriceEstimate, Error>).self) { group in
             var next = 0
 
-            while next < subjects.count {
+            while next < pending.count {
                 if Task.isCancelled { break }
                 let index = next
                 next += 1
-                let subject = subjects[index]
+                // Each lot's own page is read here, in the queueing loop, so the GETs overlap the
+                // model calls already in flight rather than delaying the batch behind one serial pass
+                // over every page. The same read feeds the photographed pass that follows, which is
+                // what `subjectForLotPage`'s cache is for.
+                let subject = await subjectForLotPage(pending[index])
                 group.addTask {
                     do {
                         return (index, .success(try await service.prePrice(subject: subject)))
@@ -1065,7 +1144,7 @@ final class AnalysisCoordinator {
                         return (index, .failure(error))
                     }
                 }
-                if next < subjects.count, next % width == 0, let finished = await group.next() {
+                if next < pending.count, next % width == 0, let finished = await group.next() {
                     applyPrePrice(finished, to: pending)
                 }
             }

@@ -14,8 +14,9 @@ hammer falls, whether a lot is worth bidding on.
   reduced to the digits (`19002`) rather than shown as an element address.
 * **Price on demand** — nothing is appraised behind your back. Every row carries **Eval**, **Price**
   and **Open**. **Eval** asks the provider one cheap question about the listing text alone (no
-  photograph is fetched or billed) and **Price** sends that lot's text *and* **every photograph on
-  its own page** — the count is the lot's business, so the lot's page answers it instead of a
+  photograph is fetched or billed, though the lot's own page is read once for its description column)
+  and **Price** sends that lot's text *and* **every photograph in its own gallery** — the count is the
+  lot's business, so the lot's page answers it instead of a
   setting — and **Open** puts that same page in a window over the table, for the photographs and the fine
   print nothing has to pay for. A **Price** is a *thorough* scan: each photograph is asked about on its
   own (`LotPhotoScan`), the reading is kept on this machine (`PhotoReadingStore`), and one last request
@@ -49,8 +50,9 @@ The project is Swift 6 with `SWIFT_STRICT_CONCURRENCY = complete`; it must build
 concurrency warnings. There are no third-party dependencies.
 
 Verify the transports and the table's rules (quota retry, pacing, cancellation, request shaping, both
-DeepSeek passes, how a whole gallery of photographs is attached and trimmed to one request's inline
-budget, a whole thorough scan driven end to end — one request per photograph, the readings reused from
+DeepSeek passes, how a lot's own gallery is attached and trimmed to one request's inline
+budget, the description column reaching both the cheap and the thorough prompt, a whole thorough scan
+driven end to end — one request per photograph, the readings reused from
 the store on the second scan, and a failed reconciliation falling back to the on-machine merge — the
 on-device label reader's rules for what counts as a barcode or a model number, every sort
 field, the bid ceilings, the anchor threshold, the search matching, the
@@ -66,9 +68,14 @@ against a stubbed `URLProtocol`:
 The injected page script has its own check: it compiles `ScraperScript` with the real selector
 profile, dumps the generated JavaScript and runs it against a small DOM shim in Node — the
 lot-number rules, the sold-badge / empty-catalogue rules, the addresses a listing prints for its
-later pages and the parameter it numbers them with, and the reading of a lot's own page (a
-gallery served from another host, a lazy-loaded photo, a CSS background, a JSON blob, a 404) are all
-driven there (skipped, not
+later pages and the parameter it numbers them with, and the reading of a lot's own page (a gallery
+split between a main frame and a thumbnail strip, a strip photo repeated in both, a carousel of eight
+thumbnails that must not become seventeen images, the live catalogue's own layout — one photograph
+under one name at three sizes, `_s` / `_l` / `_xl`, each with its own `?ts=`, and a strip its
+JavaScript builds from a data blob, with a neighbouring lot and the site's logo left out — a lazy-loaded
+photo, a header logo and a promo banner that must be left out, the description column read with its
+heading stripped, a page that declares its images only in a meta tag and a JSON blob, and a 404) are
+all driven there (skipped, not
 failed, when Node is absent):
 
 ```bash
@@ -144,7 +151,8 @@ PalletAuctionBidTool/
 │   └── DeepSeekValuationService.swift OpenAI-compatible `/chat/completions` client (json_object,
 │                                    two passes: listing text, then photographs)
 ├── ViewModels/
-│   └── AnalysisCoordinator.swift    @MainActor @Observable pipeline + progress/derived state
+│   └── AnalysisCoordinator.swift    @MainActor @Observable pipeline + progress/derived state, and the
+│                                    per-action cache of each lot's page (gallery + description)
 └── Views/
     ├── ContentView.swift            Layout: control panel, table, console, footer
     ├── ControlPanelView.swift       Title row (readiness, gear), URL and run buttons, Run tuning card
@@ -169,8 +177,9 @@ Tools/
 │                                    the table's ordering rules, bid ceilings, anchor flags, search
 │                                    matching, lot-number cleaning, the sold/empty-catalogue rules,
 │                                    column geometry — including stretch-to-fit — the column
-│                                    chooser, every photograph a lot has being attached and
-│                                    trimmed to one request's inline budget, the on-device label
+│                                    chooser, the lot's own gallery being read and its images attached
+│                                    and trimmed to one request's inline budget, the description column
+│                                    replacing the card's teaser in both passes, the on-device label
 │                                    reader, and a whole thorough scan driven end to end: one
 │                                    request per photograph, the readings reused from the store on
 │                                    a second scan, and a failed reconciliation falling back to the
@@ -178,7 +187,13 @@ Tools/
 └── scraper-js-check/                Runs the generated page script against a DOM shim in Node, so
                                      the lot-number *and* sold-badge rules are checked on the page
                                      side too — and so is the lot-page reader, with a `DOMParser` and
-                                     a `fetch` standing in for the browser's
+                                     a `fetch` standing in for the browser's: gallery containers and
+                                     the junk outside them, a carousel of eight thumbnails read as
+                                     eight addresses at the size each one opens, the live Magic Zoom
+                                     layout (`_s`/`_l`/`_xl` of one photograph) and the strip that site
+                                     builds in JavaScript, the site's own
+                                     carousels and arrows left out, the description column, and the
+                                     meta/JSON fallback
 ```
 
 **Data flow**
@@ -192,8 +207,8 @@ AppSettings ──▶ AnalysisCoordinator.run()          (scrape only)
      Eval ───────────┴─▶ AnalysisCoordinator.prePrice(lot) ──▶ service.prePrice(subject)   (text only)
      row Price ──────┴─▶ AnalysisCoordinator.scan(lot) ──▶ makeValuationService(settings)
                      │        │
-                     │        └─ window.__PAS.lotPageImages(url) ──▶ every photograph on the lot's
-                     │           (one GET, through the loaded listing)   own page ──▶ the subject
+                     │        └─ window.__PAS.lotPageImages(url) ──▶ the lot's own gallery ──▶ the
+                     │           (one GET, through the loaded listing)  + its description column   subject
                      │                                       │
                      │                                       ├─ LotPhotoScan.run(...)                (thorough)
                      │                                       │    ├─ PhotoReadingStore.readings(...) reuse
@@ -245,13 +260,19 @@ call a provider. A lot handed to the coordinator already carries the number the 
    request, no photograph fetched or billed, no line items, so the row keeps saying "not scanned"
    while its money columns show a provisional figure — the row's `provisional` flag and its italics
    are what say so. **Price** reads that lot's own page first — one GET, through the listing already
-   loaded, so the results page never moves — and then reads the lot *photograph by photograph*:
-   every image on the page is downloaded concurrently and MIME-normalised, each one gets its own
+   loaded, so the results page never moves — and takes two things off it: the gallery, so the scan
+   works from every photograph the lot shows rather than the card's thumbnail, and the description
+   column, so the words the model reasons from are what the lot actually holds rather than the card's
+   teaser. It then reads the lot *photograph by photograph*: every gallery image is downloaded
+   concurrently and MIME-normalised, each one gets its own
    request (`inline_data` parts for Gemini, `image_url` data URLs for DeepSeek), and only then is the
    gallery reconciled into the pallet's line items in one further request. A card only ever shows
    thumbnails, so the lot's page is where the photographs are, and how many there are varies per lot:
    the page decides, not a setting (deviation 24) — **Photos / scan** then caps how many get the
-   individual treatment, for a metered key. **Open** is the same page in a sheet over the table — the
+   individual treatment, for a metered key. **Eval** reads the same page for the same reason: a
+   text-only estimate is only worth anything if it is built from the listing's real copy, so it sends
+   no photographs but the page's description, not the card's. **Open** is the same page in a sheet
+   over the table — the
    photographs, the full description and the bid history, with nothing sent anywhere and with the
    run's session behind it, so it arrives signed in. Safari stays one click away in that sheet's
    header, and the sheet's own edges are drag handles — the page area opens at the size it always
@@ -288,9 +309,11 @@ call a provider. A lot handed to the coordinator already carries the number the 
 A **Price** is a thorough scan, and the shape of it is the same on both providers — the provider only
 supplies two things: how to ask about one photograph, and how to ask for the reconciliation.
 
-1. **The gallery is fetched.** The lot's own page is read for every photograph it carries (deviation
-   24), the images are downloaded concurrently and MIME-normalised, and each is capped at 6 MB with the
-   whole gallery capped by the request's inline budget.
+1. **The gallery and the description are fetched.** The lot's own page is read for the containers the
+   profile names as its gallery (deviation 24), the images are downloaded concurrently and
+   MIME-normalised, and each is capped at 6 MB with
+   the whole gallery capped by the request's inline budget. The same page read yields the listing's
+   description column, which is what both passes reason from.
 2. **A photograph at a time.** One request per photograph, carrying that frame alone, the listing text,
    and the app's own reading of *that* frame — barcode digits and printed identifiers included. The
    answer is a `PhotoReading`: what the frame showed, each product group with its location, packaging,
@@ -336,14 +359,15 @@ text pass's answer is kept rather than failing the lot (the row's expanded detai
 passes produced the numbers).
 
 **How many photographs travel** is the lot's own business, and the app asks the lot: **Price**
-fetches the lot's page and attaches every image on it. What can still hold an image back is technical
+fetches the lot's page and attaches the gallery it carries, along with the description column that
+both passes reason from. What can still hold an image back is technical
 rather than editorial — one photograph over 6 MB, or a whole gallery over the 12 MB budget a single
 request is allowed (base64 inflates the payload by about a third, and the providers cap it) — and
 anything held back is *counted*: the console says `40 of 46 image(s), 6 over the inline budget`
 instead of quietly reporting forty, and `ValuationOutcome` carries the three numbers the row and the
 log are built from. If the page cannot be read at all (a challenge, a 404, a gallery rendered only in
-JavaScript), the card's thumbnails stand in and the log says which happened — a scan never fails over
-a page that will not read.
+JavaScript), the card's thumbnails and its teaser stand in and the log says which happened — a scan
+never fails over a page that will not read.
 
 **The photographs are read twice, and the first reading is free.** Before anything is uploaded,
 `LotImageDigest` runs Vision over the same images on this machine: `VNDetectBarcodesRequest` decodes
@@ -798,7 +822,9 @@ driving a consumer web page" is not, deliberately.
     pallet shows two photographs; a mixed one shows forty; and the four a card carried were thumbnails
     either way, so the operator was guessing a number that was never theirs to know. The stepper is
     gone, along with `AppSettings.imagesPerLot` and the `imageLimit` argument the valuation services
-    used to take, and **Price** now reads the lot's own page and attaches every image on it.
+    used to take, and **Price** now reads the lot's own page and attaches the gallery it carries —
+    while **Eval**, which sends no photographs, reads the same page for the description column so its
+    text-only estimate is built from the listing's real copy rather than the card's teaser.
     Four decisions are worth stating. (a) *The page is fetched, not navigated to.* `window.__PAS` runs
     a same-origin `fetch` against the lot's URL from inside the listing the scraper already has
     loaded, then parses the answer with `DOMParser`. That is what makes it affordable and safe: the
@@ -806,17 +832,64 @@ driving a consumer web page" is not, deliberately.
     `URLSession`, would need a cookie copy to match), it costs one GET rather than a load-and-come-back,
     and the results page — its scroll position, its page number, the automation's own state — is never
     touched. `callAsyncJavaScript` is what awaits the promise; `evaluateJavaScript` would hand back the
-    unresolved promise itself. (b) *Everything on the page counts, and nothing is capped.* The reader
-    collects the markup's `<img>` (including lazy `data-src` and every `srcset` candidate), `<picture>`
-    sources, CSS background images and links to image files, plus the two places a gallery hides when
-    it is not in the markup at all: a declared lead image (`og:image`, `twitter:image`,
-    `link rel="image_src"`) and image URLs inside data blobs (JSON-LD, `__NEXT_DATA__`). Relative
+    unresolved promise itself. (b) *The lot's gallery is read, and nothing else on the page is.* The
+    page is not the lot: it also carries the site's logo, its promotion carousel, a "recently viewed"
+    rail and links to the neighbouring lots, and a vision model asked to price a promotion banner will
+    price it. So the reader is scoped to the containers the profile names — `lotPageGallerySelectors`,
+    the left-hand slide column (`div.auc_slide.left`) that holds the frame and the strip of thumbnails
+    beneath it, then the strip by name (`ul.mediaThumbnails`) in case a layout moves it out of that
+    column — and the whole of each container's subtree, with the class the site also reuses for its own
+    carousels deliberately *not* a rule: a rail of neighbouring lots read as this lot's gallery is how a
+    lot with eight photographs became a scan of seventeen. Inside those containers one element is one
+    photograph, and the elements are walked in document order — the album's own order, which is what the
+    inline budget trims against. An anchor whose address *is* an image is a gallery *slot*: the frame
+    shows one photograph at a time and the strip holds the album, so the address a thumbnail opens is
+    the photograph and the `<img>` inside it is that same photograph at thumbnail size — taking both is
+    how eight photographs become sixteen requests' worth of payload. An `<img>` outside such a link
+    contributes its own *best* attribute rather than one entry per attribute (`src`, a lazy `data-src`,
+    the `data-large_image` standing behind a thumbnail), a `<picture>`'s sources and its `<img>` are
+    compared and the best of them wins, and a `style` attribute's `url(...)` counts when a layout paints
+    a photograph in. Addresses are then keyed by *photograph* rather than by string: the variant folder,
+    the size suffix, the `@2x` marker and the query string are stripped, and the better copy — the one
+    whose name already said `large`, the one a thumbnail opens — replaces a worse one in place, so the
+    frame's copy, the strip's thumbnail and the full-size copy a lightbox holds are one image rather
+    than three. That is exactly what the live catalogue prints: one photograph under one name at three
+    sizes — `112184_s.jpg` (56×100, the strip's own crop), `112184_l.jpg` (281×500, the frame, repeated
+    as the anchor's `data-image`) and `112184_xl.jpg` (720×1280, the copy the thumbnail opens) — each
+    with its own `?ts=` cache-buster, inside an `<a class="image-thumb-slide mz-thumb" href="…_xl.jpg"
+    data-image="…_l.jpg"><img src="…_s.jpg"></a>`. The photograph is the *digits* and a size code that
+    follows a number is only a size, so those three collapse to the one entry a viewer would open — 11
+    photographs are 11 addresses of ~138 KB each, which one request carries comfortably. Two different
+    photographs do not share a name, so nothing real is merged. The layout's
+    own props never make the list either: spacers, 1×1 pixels, spinners, sprites, SVGs, and the arrows,
+    close buttons and magnifiers a carousel keeps inside the very container the gallery is read from.
+    A strip this site builds in JavaScript is read as well. Its page ships the frame and an empty
+    `ul.mediaThumbnails`, so the addresses a `fetch` sees exist only in the data blob the script fills
+    the strip from; the reader therefore also takes an address the page declares in a blob when it sits
+    in the same *folder* as a photograph the containers already produced. `…/images/lot/1121/` is this
+    lot, `…/images/lot/1187/` is the one in the "recently viewed" rail and `…/assets/` is the site's
+    logo, so a JavaScript-built strip is recovered without a neighbouring lot being dragged in — and the
+    reader says so rather than leaving the count to be taken on trust (`the page data supplied N more
+    photograph(s) than the gallery markup held`). Nothing is capped: how many photographs a lot has is
+    the lot's business. Only when *no* container
+    matched at all — a gallery built entirely in JavaScript, with no container to read and no folder to
+    match a declared address against — does the reader fall back to the places a page declares its lead
+    image (`og:image`, `twitter:image`, `link rel="image_src"`, `imageMetaSelectors`) and to image URLs
+    inside data blobs (JSON-LD, `__NEXT_DATA__`), and the report says so rather than reading as if the
+    gallery had been found and happened to be empty. Relative
     addresses resolve against the *lot page*, not the listing — joining `/images/208-1.jpg` onto the
-    results address is a silent 404, which is why `absolute(_:base)` now takes a base. The card's own
+    results address is a silent 404, which is why `absolute(_:base)` now takes a base. The same read
+    yields the listing's real copy: `lotPageDescriptionSelectors` is walked in order and the first
+    selector that yields text is used, its heading ("Description") stripped and its whitespace
+    condensed — the block itself (`div.active.ins_cnt.description-info-content`) before the column that
+    contains it (`div.auc_info.right`), so the bid box, the countdown and the "ask a question" form
+    beside the copy stay out of the prompt. That text replaces the card's teaser on the row and in both
+    passes; a page that yields none leaves the card's copy alone rather than blanking it. The card's own
     thumbnails remain as the fallback and keep their profile bound, now named `maxCardImages` because
     that is all it ever was. (c) *A page that will not read is not a failed scan.* A challenge page, a
-    404, a non-HTML document or a gallery rendered entirely in JavaScript comes back as `ok:false` (or
-    as zero images) and the scan proceeds with the card's thumbnails, saying so in the log. The one
+    404, a non-HTML document, or a gallery built in JavaScript that declares its addresses nowhere at
+    all comes back as `ok:false` (or as zero images) and the scan proceeds with the card's thumbnails and
+    its teaser, saying so in the log. The one
     thing that *can* still hold a photograph back is the provider's payload ceiling — one image over
     `maxImageBytes`, or a whole gallery over `LotImageLoader.defaultTotalBytes` (12 MB, ~16 MB once
     base64-encoded, comfortably inside Gemini's 20 MB request limit and DeepSeek's 48 MiB body cap) —
@@ -825,7 +898,9 @@ driving a consumer web page" is not, deliberately.
     the inline budget`. (d) *It costs one extra request per lot.* About 1 GET on the auction host per
     scanned lot, which is why it happens at **scan** time rather than at scrape time: a board of 200
     lots where three are ever scanned pays for three page reads, and a sold or ignored lot pays
-    nothing.
+    nothing. One lot page is read per lot per action — the page's gallery is cached for the length of
+    that action, so the pre-price pass and the photographed pass that follows it share one GET rather
+    than fetching the same page twice, and clearing the cache is what makes a re-click re-read it.
 
 25. **The table is one family of chips, one untitled control column, and a header that reads as
     chrome.** The visual pass over `LotTableView` / `LotTableRow` grew out of one concrete complaint —
@@ -930,6 +1005,23 @@ driving a consumer web page" is not, deliberately.
     once per frame instead of a large one once per pallet, and it is why the ceiling and the store
     exist rather than being optional extras.
 
+28. **A task the pipeline starts hands its result back to the main actor instead of assuming it
+    resumed there.** `AnalysisCoordinator` is `@MainActor`, so a `Task { … }` written inside it is
+    compiled against that isolation and its first statement does run on the main actor. What the type
+    system cannot promise is where the body *resumes* once an `await` has handed the task to another
+    executor — and the row it writes to is main-actor only, so a body that resumed on a cooperative
+    thread and then called `LotItem.applyValuation` did not quietly fail to apply anything: the
+    synchronous write crossed into a main-queue-only path, the assertion in that method's own
+    isolation check fired, and the app died with `EXC_BREAKPOINT`, reported inside `items.reduce`
+    because that is where the row's totals are recomputed rather than where the call came from. Two
+    rules hold now. Every task this class starts is spelled `Task { @MainActor … }`, so the work
+    between suspending points is main-actor by declaration rather than by where the closure was
+    written. And each one's last act is `await onMainActor { … }` — a single `MainActor.run` hop — so
+    the row is touched on the main actor by construction, whatever executor the task was handed back
+    to. The hop costs one suspension at a point where the work was already asynchronous and changes
+    no arithmetic; `Task.isCancelled` is still read in the body, before the hop, because that question
+    is about the task asking it.
+
 ---
 
 Selectors live in data, not code: edit `ScrapeProfilePresets.genericBase()` or add a new
@@ -950,8 +1042,10 @@ Two more lists decide what a **Price** sends, now that the count comes off the l
 
 | Field | What it is for |
 | --- | --- |
+| `lotPageGallerySelectors` | The containers a lot's own page keeps its gallery in, most specific first — the left-hand slide column (`.auc_slide.left`), which holds the frame and the thumbnail strip beneath it, then the strip by name (`ul.mediaThumbnails`) in case a layout moves it out. This is the whole of the reader's image scope: everything inside them counts, walked in document order with one address per photograph (the copy a thumbnail opens, de-duplicated across the sizes of that photograph — `_s`/`_l`/`_xl` of one name are one photograph), and nothing outside them is looked at at all, which is what keeps the site's logo, its promotion banner, its own carousels and the "recently viewed" rail out of a valuation. A strip the site builds in JavaScript is recovered from the page's own data blob, and only for addresses that share the gallery's folder (see deviation 24). |
+| `lotPageDescriptionSelectors` | Where the page prints the listing's real copy, most specific first — the description block before the column that contains it. The first selector yielding text wins, its heading is stripped and its whitespace condensed; that text replaces the card's teaser in both the **Eval** and the **Price** prompt. |
 | `maxCardImages` | How many thumbnails are taken from a *card*. Only the fallback path uses it: a lot whose page cannot be read is still appraised from its card. It is not the lot's image count, and nothing in the UI sets it. |
-| `imageMetaSelectors` | Where a page declares its lead image (`og:image`, `twitter:image`, `link rel="image_src"`). The lot-page reader falls back to these when the gallery markup itself is rendered by JavaScript. |
+| `imageMetaSelectors` | Where a page declares its lead image (`og:image`, `twitter:image`, `link rel="image_src"`). These are the last resort, read only when no gallery container matched — a gallery built entirely in JavaScript. |
 | `lotPageTimeoutSeconds` | How long one lot's page is given before the scan falls back to the card's thumbnails. |
 
 And two decide *which address is the lot's own page* — the one **Open** shows, and the one the page
@@ -1001,8 +1095,11 @@ when a card carries three links.
 | Every lot fails with `HTTP 404` | Nothing to fix — the endpoint used to be built with `appendingPathComponent`, which turns Google's `:generateContent` method into a non-existent path. See deviation 11. |
 | Rows show `HTTP 401`/`403` on DeepSeek | The key is missing, wrong, or the prepaid balance is empty. A `402`/`Insufficient Balance` message comes straight from the API's error body. |
 | Valuation is much slower than the lots suggest | **Requests / min** is pacing the calls on purpose (the log prints `paced to N request(s)/min`). Raise it if your plan allows, or set it to "off". |
-| Slow scans | Each request carries **every** photograph on the lot's page, and DeepSeek sends the lot twice. Switch to `gemini-2.5-flash-lite`, or narrow the board with **Eval all** first so only the lots worth it carry photographs. |
+| Slow scans | Each request carries **every** photograph in the lot's gallery, and DeepSeek sends the lot twice. Switch to `gemini-2.5-flash-lite`, or narrow the board with **Eval all** first so only the lots worth it carry photographs. |
 | A scan sends fewer images than the lot page shows | The rest did not fit one request's inline budget (one image over 6 MB, or the set over 12 MB); the console line says `N of M image(s), K over the inline budget`. Nothing to configure — the budget is the provider's payload ceiling — but a lot of very large photographs will always be trimmed. |
-| The log says "the lot page could not be read" | The scan fell back to the card's thumbnails. Usual causes: the page needed a login the session did not have, the site served a challenge page, or the gallery is built entirely in JavaScript and declares no `og:image`. Open **Page** to see what the site is returning; if the gallery really is JS-only, adding its JSON endpoint to `imageMetaSelectors` is not enough — the address has to appear in the page's own markup or data blob for the reader to find it. |
+| A scan sends *more* images than the lot has photographs, or prices the site's own banner | `lotPageGallerySelectors` is too loose for the site (a bare `[class*='slide' i]`, or a container that wraps the header as well as the gallery, or a class the site reuses for its own carousels). Tighten it to the element that holds the lot's photographs — deviating from *this* lot's gallery is what an appraisal is allowed to be wrong about. The reader already sends one address per photograph: each thumbnail's *opened* copy rather than the thumbnail, and one entry per photograph however many sizes the page prints. |
+| The log prints `the page data supplied N more photograph(s) than the gallery markup held` | Expected on a site whose thumbnail strip is built in JavaScript: the HTML the reader fetches holds the frame and an *empty* strip, and the other addresses came from the page's own data blob. They were taken because they share the lot's folder — the check that keeps the "recently viewed" rail out — so the count is the lot's photographs, not the page's images. Nothing to configure. |
+| An **Eval** reads the card's teaser rather than the full copy | `lotPageDescriptionSelectors` matched nothing on the lot page — the site keeps its copy somewhere the profile does not name, or serves it only to a signed-in session. Add the container (the block itself first, the column second) and re-**Eval**. |
+| The log says "the lot page could not be read" | The scan fell back to the card's thumbnails and the card's teaser. Usual causes: the page needed a login the session did not have, or the site served a challenge page. Open **Page** to see what the site is returning. A gallery built in JavaScript is not by itself the reason — its strip is read from the page's own data blob when the addresses share the gallery's folder (see the row above) — so this is a page the reader could not get at, not one it could not parse. |
 | Rows show `empty model answer` on DeepSeek | JSON mode returned nothing even after the automatic re-ask (DeepSeek documents this failure mode). Re-run the lot; it is a per-call coin flip, not a configuration problem. |
 

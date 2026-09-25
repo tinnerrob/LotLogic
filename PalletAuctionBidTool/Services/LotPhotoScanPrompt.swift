@@ -49,7 +49,10 @@ enum LotPhotoScanPrompt {
     printed under a barcode (UPC/EAN/GTIN), size, weight and count wording, case codes, condition \
     wording, and any price sticker. Zoom into packaging and shelf tickets. When the app's own text \
     and barcode reader has already reported what it read on this photograph, treat that as verified \
-    and price the model and size it names.
+    and price the model and size it names. Price the *most exactly identified* thing you can: a \
+    barcode or model number beats a brand with a product name and size, which beats a brand and a \
+    category, which beats the category alone. A generic price for a specific product is the wrong \
+    price, so name what you identified in `name` and record how you identified it in `evidence`.
     6. `labelText` is what the label says, copied as read and no longer than 20 words — brand, \
     product, size, count. Copy it rather than paraphrasing it, and leave it empty when nothing was \
     legible.

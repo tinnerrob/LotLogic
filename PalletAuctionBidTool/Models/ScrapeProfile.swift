@@ -67,11 +67,33 @@ struct ScrapeProfile: Codable, Hashable, Sendable {
     /// Meta / link elements that declare a page's lead image, read when a lot's own page is scanned.
     ///
     /// A gallery is occasionally declared nowhere but the document head (`og:image`,
-    /// `twitter:image`, `link rel="image_src"`), which is exactly the case where the markup scan
-    /// alone would come back with nothing.
+    /// `twitter:image`, `link rel="image_src"`), which is exactly the case where the gallery markup
+    /// alone would come back with nothing. Deliberately a **last resort**, consulted only when no
+    /// gallery container matched at all: a page that has a gallery has the lot's own photographs in
+    /// it, while everything else the page mentions — the site's logo, a promotion banner, a
+    /// "recently viewed" strip, the neighbours a footer links to — belongs to somebody else and a
+    /// vision model asked to price it will price it.
     var imageMetaSelectors: [String]
 
     // MARK: The lot's own page (the Open button, and the page reader)
+
+    /// Where a lot's own page keeps the **description** of what is in the lot, most specific first.
+    ///
+    /// A card carries a teaser — "Pallet of General Merchandise" — so a text estimate built from the
+    /// card is a guess about a guess. The page's description column is where the site prints the
+    /// listing's real copy: brands, model numbers, counts, condition wording. The page reader takes
+    /// the first selector that yields text, so the description block itself is listed before the
+    /// column that contains it.
+    var lotPageDescriptionSelectors: [String]
+
+    /// The containers a lot's own page keeps its **gallery** in, most specific first.
+    ///
+    /// This is the whole of the page reader's image scope: the main slide, then the thumbnail strip.
+    /// Everything the profile names contributes, in the order it is named and with addresses
+    /// de-duplicated, so a gallery split across two elements — a main frame and a separate
+    /// `ul.mediaThumbnails` — is read whole. Nothing outside these containers is looked at; see
+    /// `imageMetaSelectors` for the last-resort case.
+    var lotPageGallerySelectors: [String]
 
     /// Anchors on a card that point at the lot's own page, most specific first.
     ///

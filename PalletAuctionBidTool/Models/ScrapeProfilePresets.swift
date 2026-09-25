@@ -78,6 +78,32 @@ extension ScrapeProfile {
                 "meta[name='twitter:image']", "meta[property='twitter:image']",
                 "link[rel='image_src']"
             ],
+            // The catalogue this tool targets prints the lot's real copy in
+            // `<div class="active ins_cnt description-info-content">`, inside the right-hand
+            // `<div class="auc_info right">` column of the lot page. The block itself is named first
+            // so the reader takes the copy rather than the column's other furniture (the bid box, the
+            // countdown, the "ask a question" form all live beside it).
+            lotPageDescriptionSelectors: [
+                "div.active.ins_cnt.description-info-content",
+                "div.ins_cnt.description-info-content",
+                "[class*='description-info-content' i]",
+                "div.auc_info.right",
+                "[class*='auc_info' i]"
+            ],
+            // The lot's own gallery, and only it: the left-hand slide column, which holds the frame the
+            // carousel shows one photograph in at a time *and* the strip of thumbnails under it, then
+            // the strip by name in case a layout moves it out of the column.
+            //
+            // Nothing else on the page is read. The header logo, the promotion carousel and the
+            // "recently viewed" rail are not this lot, and a bare `div.auc_slide` would drag the last of
+            // those in: the site reuses the class for its own carousels, and a rail of neighbouring lots
+            // read as this lot's gallery is exactly how a lot with eight photographs becomes a scan of
+            // seventeen.
+            lotPageGallerySelectors: [
+                "div.auc_slide.left",
+                "ul.mediaThumbnails",
+                "[class*='mediaThumbnails' i]"
+            ],
             detailLinkSelectors: [
                 "[class*='lot-link' i]", "[class*='lotlink' i]", "[class*='card-link' i]",
                 "[class*='detail-link' i]", "[class*='detaillink' i]", "[class*='item-link' i]",

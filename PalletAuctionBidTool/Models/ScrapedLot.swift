@@ -124,4 +124,18 @@ extension ValuationSubject {
         copy.imageURLs = urls
         return copy
     }
+
+    /// The same lot with the listing's own description text.
+    ///
+    /// Used when a lot's own page has been read: a card carries a teaser ("Pallet of General
+    /// Merchandise") while the page's description column carries what the lot actually holds — brands,
+    /// model numbers, counts, condition wording — which is the text a prompt should be built from.
+    /// Empty text is read as "the page had none" and leaves the card's copy alone.
+    func withDescription(_ text: String) -> ValuationSubject {
+        let cleaned = text.condensedWhitespace
+        guard !cleaned.isEmpty else { return self }
+        var copy = self
+        copy.rawDescription = cleaned
+        return copy
+    }
 }

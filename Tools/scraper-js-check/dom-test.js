@@ -6,11 +6,12 @@
 //  site. Run it through Tools/scraper-js-check/run.sh, which compiles the Swift side and hands the
 //  generated JavaScript to this file.
 //
-//  The shim models only what the scraper touches: `querySelectorAll` with simple selectors (tag,
-//  `[attr]`, `[attr*=value]`, `[attr^=value]`, `[attr=value]`, with the ` i` flag), `getAttribute`,
-//  `textContent`, `closest` (always null) and `addEventListener` (a no-op). Descendant selectors are
-//  not modelled and deliberately match nothing — the card selectors the profile tries first are
-//  simple ones, so the card under test is always found.
+//  The shim models only what the scraper touches: `querySelectorAll` with simple *compound* selectors
+//  (tag, `.class`, `[attr]`, `[attr*=value]`, `[attr^=value]`, `[attr=value]`, any run of those, with
+//  the ` i` flag), `getAttribute`, `textContent`, `closest` (always null) and `addEventListener` (a
+//  no-op). Descendant selectors are not modelled and deliberately match nothing — the selectors the
+//  profile uses to name a gallery container, a description block or a card are all compound ones, so
+//  the element under test is always found.
 //
 const fs = require('fs');
 // The generated script comes from run.sh (or from the environment); `--debug` is a flag, not a path.
@@ -19,14 +20,34 @@ const scriptPath = process.env.SCRAPER_JS
   || '/tmp/scraper.js';
 
 // ---- a very small DOM, only what the scraper touches -------------------------
+//
+// A part is one *compound* selector — a tag, any number of `.class` tokens and any number of
+// `[attr...]` tests run together (`div.auc_slide.left`, `ul.mediaThumbnails`, `img[data-src]`) — or
+// `*`, which the scraper walks a container with so its elements come back in document order. That is
+// the shape the profile names a gallery container and a description block in, so it has to match here,
+// or the lot-page checks would be proving something no browser would agree with. Descendant combinators
+// are still not modelled and deliberately match nothing.
 function matches(el, part) {
-  const m = part.match(/^([a-zA-Z]*)((?:\[[^\]]*\])*)$/);
-  if (!m) return false;
-  const tag = m[1].toLowerCase();
-  if (tag && el.tag.toLowerCase() !== tag) return false;
-  const conds = m[2] ? m[2].match(/\[[^\]]*\]/g) || [] : [];
-  for (const raw of conds) {
-    const inner = raw.slice(1, -1).replace(/\s+i$/, '');
+  // `*` is how the scraper walks a container, so its elements come back in document order.
+  if (part === '*') return true;
+
+  const token = /([a-zA-Z][\w-]*)|\.([\w-]+)|\[([^\]]*)\]/g;
+  let consumed = 0;
+  let m = token.exec(part);
+  while (m) {
+    if (m.index !== consumed) return false;
+    consumed = token.lastIndex;
+    if (m[1] !== undefined) {
+      if (el.tag.toLowerCase() !== m[1].toLowerCase()) return false;
+      m = token.exec(part);
+      continue;
+    }
+    if (m[2] !== undefined) {
+      if (String(el.attrs.class || '').split(/\s+/).indexOf(m[2]) < 0) return false;
+      m = token.exec(part);
+      continue;
+    }
+    const inner = m[3].replace(/\s+i$/, '');
     const eq = inner.match(/^([\w-]+)\s*(?:([*^$~|]?)=\s*['"]?([^'"\]]*)['"]?)?$/);
     if (!eq) return false;
     const attr = eq[1];
@@ -34,14 +55,16 @@ function matches(el, part) {
     const value = eq[3];
     const actual = el.attrs[attr];
     if (actual === undefined) return false;
-    if (op === undefined) continue;
-    const hay = String(actual).toLowerCase();
-    const needle = String(value).toLowerCase();
-    if (op === '*' && hay.indexOf(needle) < 0) return false;
-    if (op === '^' && hay.indexOf(needle) !== 0) return false;
-    if (op === '=' && hay !== needle) return false;
+    if (op !== undefined) {
+      const hay = String(actual).toLowerCase();
+      const needle = String(value).toLowerCase();
+      if (op === '*' && hay.indexOf(needle) < 0) return false;
+      if (op === '^' && hay.indexOf(needle) !== 0) return false;
+      if (op === '=' && hay !== needle) return false;
+    }
+    m = token.exec(part);
   }
-  return true;
+  return consumed > 0 && consumed === part.length;
 }
 
 class El {
@@ -89,10 +112,9 @@ class El {
 // ---- a very small HTML scanner, standing in for DOMParser --------------------
 //
 // `window.__PAS.lotPageImages` parses a fetched page with `DOMParser` and walks it exactly like a
-// card. Modelling that means handing the script something with `querySelectorAll` on it, so this
-// turns the fixture markup into a flat `El` list. It reads every tag it finds (no nesting, which the
-// image collector does not need), keeps the text of `<script>`/`<style>` so gallery JSON blobs can be
-// checked, and understands quoted, single-quoted and bare attributes.
+// card. Modelling that means handing the script something with `querySelectorAll` on it, so this turns
+// the fixture markup into a nested `El` tree. It reads tags, keeps the text of `<script>`/`<style>` so
+// gallery JSON blobs can be checked, and understands quoted, single-quoted and bare attributes.
 function attrsOf(text) {
   const attrs = {};
   const pattern = /([\w:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g;
@@ -107,19 +129,49 @@ function attrsOf(text) {
   return attrs;
 }
 
+// Tags that never wrap anything, so they are never pushed onto the open-element stack.
+const VOID_TAGS = ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
+  'param', 'source', 'track', 'wbr'];
+
+// A nested tree, because the lot-page reader is *container-scoped*: it asks a gallery element for the
+// `img`s inside it and a description element for its text, and a flat list of tags would make every
+// container childless and every one of those answers empty. Text between tags is kept on the element
+// that contains it, because that is what `textContent` is built from — a `<h3>Description</h3>` and
+// the copy under it have to come back as one string with the heading first.
 function parseHTML(html) {
   const root = new El('html', {}, '', []);
-  const pattern = /<([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+  const stack = [root];
+  const pattern = /<(\/?)([a-zA-Z][\w-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>|([^<]+)/g;
   let match = pattern.exec(html);
   while (match) {
-    const tag = match[1].toLowerCase();
-    let text = '';
-    if (match[3] !== '/' && (tag === 'script' || tag === 'style')) {
-      const close = html.indexOf('</' + tag, pattern.lastIndex);
-      text = html.slice(pattern.lastIndex, close < 0 ? html.length : close);
-      pattern.lastIndex = close < 0 ? html.length : close;
+    const top = stack[stack.length - 1];
+    // Text, a comment-free run of it: appended to whatever element is open at the time.
+    if (match[5] !== undefined) {
+      top.ownText = top.ownText + ' ' + match[5];
+      match = pattern.exec(html);
+      continue;
     }
-    root.kids.push(new El(tag, attrsOf(match[2]), text, []));
+    const tag = match[2].toLowerCase();
+    if (match[1] === '/') {
+      // Close the nearest matching element; a stray close for a tag never opened changes nothing.
+      for (let index = stack.length - 1; index > 0; index -= 1) {
+        if (stack[index].tag === tag) { stack.length = index; break; }
+      }
+      match = pattern.exec(html);
+      continue;
+    }
+    const element = new El(tag, attrsOf(match[3]), '', []);
+    element.parentElement = top;
+    top.kids.push(element);
+    if (match[4] !== '/' && (tag === 'script' || tag === 'style')) {
+      // Raw text: the JSON blobs a gallery is declared in have to survive intact.
+      const close = html.indexOf('</' + tag, pattern.lastIndex);
+      element.ownText = html.slice(pattern.lastIndex, close < 0 ? html.length : close);
+      pattern.lastIndex = close < 0 ? html.length : close;
+      match = pattern.exec(html);
+      continue;
+    }
+    if (match[4] !== '/' && VOID_TAGS.indexOf(tag) < 0) stack.push(element);
     match = pattern.exec(html);
   }
   return root;
@@ -515,6 +567,15 @@ check(shape.pages === 7 && shape.parameter === null,
 // listing only ever carries thumbnails, so this is the half of the rule that decides the count —
 // there is no `Images / lot` setting left to argue with.
 //
+// The page is not the lot, though. A lot page also carries the site's logo, its promotion carousel,
+// a "recently viewed" rail and the neighbouring lots a footer links to, and a vision model asked to
+// price a promotion banner will price it. So only the containers the profile names are read — the
+// main frame (`.auc_slide.left`) and the thumbnail strip (`ul.mediaThumbnails`) — and the fixture
+// deliberately puts look-alike junk *outside* them: a header logo, a promo background, a
+// "recently viewed" photograph, a `og:image` meta and a JSON-LD blob. None of the last two is a
+// gallery, and both are what a JavaScript-rendered gallery falls back to, so each is exercised where
+// it belongs: ignored here, used on the page that has no gallery markup at all.
+//
 // The fixture deliberately serves the gallery from a different host than the listing
 // (`lots.example.test` vs `example.test`), because a relative `/img/...` must resolve against the
 // page it was fetched *from*: joining it onto the listing's address is a silent 404.
@@ -526,13 +587,31 @@ const galleryHTML = [
   '{"@type":"Product","image":["https://cdn.example.test/json/208.jpg","https://cdn.example.test/json/208-2.jpg"]}',
   '</script>',
   '</head><body>',
+  '<img class="site-logo" src="/img/logo.png">',
+  '<div class="promo" style="background-image:url(/img/promo-banner.jpg)"></div>',
+  '<div class="auc_slide left">',
   '<img src="/img/208-1-thumb.jpg">',
   '<img data-src="/img/208-2-thumb.jpg" src="">',
   '<img src="/img/spinner.svg">',
   '<img src="/img/placeholder.png">',
   '<picture><source srcset="/img/208-3-small.jpg 400w, /img/208-3-large.jpg 1200w"></picture>',
-  '<div style="background-image:url(/img/208-4-background.jpg)"></div>',
-  '<a href="/img/208-5-full.jpg">open</a>',
+  '</div>',
+  '<ul class="mediaThumbnails">',
+  '<li><img src="/img/208-1-thumb.jpg"></li>',
+  '<li><img src="/img/208-4-thumb.jpg"></li>',
+  '<li><img data-src="/img/208-5-thumb.jpg" src=""></li>',
+  '<li><img src="/img/208-6-thumb.jpg"></li>',
+  '</ul>',
+  '<div class="recently-viewed"><img src="/img/other-lot-99.jpg"></div>',
+  '<div class="auc_info right">',
+  '<div class="bid-box">Current bid: $640.00</div>',
+  '<div class="active ins_cnt description-info-content">',
+  '<h3 class="auc_title">Description</h3>',
+  '<p>Lot 208 — a pallet of mixed kitchen appliances.</p>',
+  '<p>Includes   6x Ninja BL610 blenders, UPC 622356528163, and 4x Instant Pot Duo 6qt.</p>',
+  '</div>',
+  '<div class="auc_ask">Ask a question</div>',
+  '</div>',
   '</body></html>'
 ].join('');
 
@@ -544,8 +623,10 @@ const galleryHTML = [
 
   check(report.ok === true, 'the lot page is read', JSON.stringify(report.error));
   check(report.url === 'https://lots.example.test/auction/lot/208', 'and the report names the page it read', report.url);
-  check(report.images.length === 9, 'every image the page mentions comes back', JSON.stringify(report.images));
-  check(report.images.length > 4, 'uncapped: the card limit does not apply to a lot page', JSON.stringify(report.images.length));
+  check(report.images.length === 6, "every photograph the lot's own gallery shows comes back",
+    JSON.stringify(report.images));
+  check(report.images.length > 4, 'uncapped: the card limit does not apply to a lot page',
+    JSON.stringify(report.images.length));
 
   check(
     report.images.indexOf('https://lots.example.test/img/208-1.jpg') >= 0,
@@ -554,15 +635,209 @@ const galleryHTML = [
   );
   check(report.images.indexOf('https://lots.example.test/img/208-2.jpg') >= 0, 'a lazy-loaded photo is picked up too');
   check(report.images.indexOf('https://lots.example.test/img/208-3-large.jpg') >= 0, 'the widest srcset candidate wins');
-  check(report.images.indexOf('https://lots.example.test/img/208-4-background.jpg') >= 0, 'a CSS background counts');
-  check(report.images.indexOf('https://lots.example.test/img/208-5-full.jpg') >= 0, 'so does a link to an image');
-  check(report.images.indexOf('https://cdn.example.test/og/208.jpg') >= 0, 'the page declares its lead image in a meta tag');
-  check(report.images.indexOf('https://lots.example.test/img/208-lead.jpg') >= 0, 'and in a link tag');
-  check(report.images.indexOf('https://cdn.example.test/json/208.jpg') >= 0, 'a gallery declared in a JSON blob is read');
-  check(report.images.indexOf('https://cdn.example.test/json/208-2.jpg') >= 0, 'including its second photograph');
+  check(report.images.indexOf('https://lots.example.test/img/208-4.jpg') >= 0,
+    'the thumbnail strip is read as well as the frame', JSON.stringify(report.images));
+  check(report.images.indexOf('https://lots.example.test/img/208-6.jpg') >= 0, 'right to its last thumbnail');
   check(report.images.every(url => url.indexOf('spinner') < 0 && url.indexOf('placeholder') < 0),
     'the page spinner and the placeholder are left out', JSON.stringify(report.images));
   check(report.images.every(url => url.indexOf('http') === 0), 'and every address is absolute', JSON.stringify(report.images));
+
+  // The page is not the lot: everything outside the gallery containers belongs to somebody else, and a
+  // vision model asked to price a promotion banner will price it. These are the addresses the old
+  // whole-page scan used to hand over — the site's logo, its promotion banner, a neighbouring lot, and
+  // the lead image a page declares for social cards.
+  const outside = ['logo.png', 'promo-banner.jpg', 'other-lot-99.jpg',
+    'og/208.jpg', '208-lead.jpg', 'json/208.jpg', 'json/208-2.jpg'];
+  check(report.images.every(url => outside.every(name => url.indexOf(name) < 0)),
+    'nothing outside the gallery is sent', JSON.stringify(report.images));
+
+  // The gallery is named twice — the frame is both `div.auc_slide.left` and `div.auc_slide`, the strip
+  // is both `ul.mediaThumbnails` and `[class*='mediaThumbnails']` — and the strip repeats the frame's
+  // first photograph, as real galleries do. None of that may double a photograph.
+  check(new Set(report.images).size === report.images.length,
+    'a container matched twice, and a photograph held in two containers, are still counted once',
+    JSON.stringify(report.images));
+
+  // The reported shape — lot 23 of catalogue 29 — and the count the operator saw: one frame showing a
+  // photograph at a time over a strip of eight thumbnails, handed to the model as seventeen images.
+  // Every photograph arrived three times (the frame's copy, the strip's thumbnail, and the full-size
+  // copy the thumbnail *opens*), the site's own carousel — which reuses `auc_slide` — added another
+  // lot's photograph, and the arrows beside the frame came along for the ride. What a scan is meant to
+  // send is one address per photograph, at the size the viewer would open.
+  //
+  // The strip is *inside* the left column here, as it is on the site, so the column and the strip
+  // overlap: the container the strip is named by must not be walked a second time.
+  const carouselHTML = [
+    '<html><body>',
+    '<img class="site-logo" src="/img/logo.png">',
+    '<div class="auc_slide right"><img src="/photos/other-lot-31.jpg"></div>',
+    '<div class="auc_slide left">',
+    '<a href="/photos/23-1.jpg?w=1800"><img src="/photos/23-1.jpg?w=1800"></a>',
+    '<a href="#" class="next"><img src="/img/arrow-right.png"></a>',
+    '<ul class="mediaThumbnails">',
+    '<li><a href="/photos/large/23-1.jpg"><img src="/photos/thumb/23-1.jpg"',
+    ' data-large_image="/photos/large/23-1.jpg"></a></li>',
+    '<li><a href="/photos/large/23-2.jpg"><img src="/photos/thumb/23-2.jpg"></a></li>',
+    '<li><a href="/photos/thumb/23-3.jpg"><img src="/photos/thumb/23-3.jpg"',
+    ' data-large_image="/photos/large/23-3.jpg"></a></li>',
+    '<li><a href="/photos/large/23-4.jpg"><img data-src="/photos/thumb/23-4.jpg" src=""></a></li>',
+    '<li><img data-src="/photos/23-5_thumb.jpg?w=90" src=""></li>',
+    '<li><a href="/photos/large/23-6.jpg"><img src="/photos/thumb/23-6.jpg"',
+    ' srcset="/photos/thumb/23-6.jpg 400w, /photos/large/23-6.jpg 1200w"></a></li>',
+    '<li><a href="/photos/23-7_thumb.jpg"><img src="/photos/23-7_thumb.jpg"></a></li>',
+    '<li><a href="/photos/large/23-8.jpg"><img src="/photos/large/23-8.jpg"></a></li>',
+    '</ul>',
+    '</div>',
+    '<div class="recently-viewed"><img src="/photos/lot-99.jpg"></div>',
+    '</body></html>'
+  ].join('');
+
+  const carousel = JSON.parse(
+    await scrape({}, { api: true, detail: { html: carouselHTML } })
+      .lotPageImages('https://lots.example.test/auction/lot/23')
+  );
+  const album = [
+    'https://lots.example.test/photos/large/23-1.jpg',
+    'https://lots.example.test/photos/large/23-2.jpg',
+    'https://lots.example.test/photos/large/23-3.jpg',
+    'https://lots.example.test/photos/large/23-4.jpg',
+    'https://lots.example.test/photos/23-5.jpg',
+    'https://lots.example.test/photos/large/23-6.jpg',
+    'https://lots.example.test/photos/23-7.jpg',
+    'https://lots.example.test/photos/large/23-8.jpg'
+  ];
+  check(carousel.ok === true && carousel.images.length === 8,
+    'eight photographs on the page are eight images, not seventeen', JSON.stringify(carousel.images));
+  check(carousel.images.join(' ') === album.join(' '),
+    'in gallery order, at the address each thumbnail opens', JSON.stringify(carousel.images));
+  check(carousel.images.indexOf('https://lots.example.test/photos/large/23-3.jpg') >= 0,
+    'a thumbnail whose link is small and whose data-large_image is full is sent at full size',
+    JSON.stringify(carousel.images));
+  check(carousel.images.every(url => url.indexOf('thumb') < 0 && url.indexOf('w=') < 0),
+    'no thumbnail copy and no resized copy of a photograph is sent', JSON.stringify(carousel.images));
+  check(carousel.images.every(url => url.indexOf('arrow') < 0),
+    "the carousel's own arrows sit inside the column and are still not photographs",
+    JSON.stringify(carousel.images));
+  check(carousel.images.every(url => url.indexOf('other-lot') < 0),
+    'and the site\'s own carousel, classed `auc_slide`, is not read as this lot\'s gallery',
+    JSON.stringify(carousel.images));
+
+  // The live layout, copied off the site: one photograph printed under one name at three sizes — a
+  // 56×100 `_s` in the strip, a 281×500 `_l` the frame shows and that the anchor also carries as
+  // `data-image`, and the 720×1280 `_xl` the thumbnail *opens* — with a cache-busting `?ts=` that
+  // differs between the copies of one photograph and between photographs. A Magic Zoom frame names the
+  // first photograph again, and the arrows live inside the very column the gallery is read from.
+  const strip = [
+    ['112175', '1790278593', '1790278592', '1790278592'],
+    ['112176', '1790278593', '1790278593', '1790278593'],
+    ['112177', '1790278594', '1790278594', '1790278594'],
+    ['112178', '1790278595', '1790278595', '1790278595'],
+    ['112179', '1790278596', '1790278596', '1790278596'],
+    ['112180', '1790278597', '1790278597', '1790278596'],
+    ['112181', '1790278597', '1790278597', '1790278597'],
+    ['112182', '1790278598', '1790278598', '1790278598'],
+    ['112183', '1790278599', '1790278599', '1790278599'],
+    ['112184', '1790278600', '1790278599', '1790278599'],
+    ['112185', '1790278600', '1790278600', '1790278600']
+  ];
+  const lotFolder = 'https://bids.palletauctions.com/images/lot/1121/';
+  const thumbnails = strip.map(function (photo) {
+    return '<li><a data-zoom-id="Zoom-1" class="image-thumb-slide mz-thumb"'
+      + ' href="' + lotFolder + photo[0] + '_xl.jpg?ts=' + photo[1] + '"'
+      + ' data-image="' + lotFolder + photo[0] + '_l.jpg?ts=' + photo[2] + '">'
+      + '<img src="' + lotFolder + photo[0] + '_s.jpg?ts=' + photo[3] + '" loading="lazy"></a></li>';
+  }).join('');
+  const magicZoomHTML = [
+    '<html><head>',
+    // A "recently viewed" rail, declared as data rather than markup: another lot, in its own folder.
+    '<script>window.recentlyViewed = ["https://bids.palletauctions.com/images/lot/1187/118701_l.jpg?ts=8"];</script>',
+    '</head><body>',
+    '<div class="auc_slide left">',
+    '<div id="Zoom-1" class="zoom"><a class="MagicZoom" href="' + lotFolder + '112175_xl.jpg?ts=1790278593">',
+    '<img src="' + lotFolder + '112175_l.jpg?ts=1790278592"></a></div>',
+    '<div class="carouselSlider"><ul class="mediaThumbnails">', thumbnails, '</ul></div>',
+    '<a class="next" href="#"><img src="/images/arrow-next.png"></a>',
+    '</div>',
+    '<div class="auc_slide right"><img src="' + lotFolder + '112199_s.jpg?ts=7"></div>',
+    '</body></html>'
+  ].join('');
+
+  const zoomed = JSON.parse(
+    await scrape({}, { api: true, detail: { html: magicZoomHTML } })
+      .lotPageImages('https://bids.palletauctions.com/auction/lot/1121')
+  );
+  const openedSizes = strip.map(photo => lotFolder + photo[0] + '_xl.jpg?ts=' + photo[1]);
+  check(zoomed.ok === true && zoomed.images.length === 11,
+    'eleven photographs under eleven names at three sizes are eleven images, not thirty-three',
+    JSON.stringify(zoomed.images));
+  check(zoomed.images.join(' ') === openedSizes.join(' '),
+    'in strip order, at the `_xl` copy each thumbnail opens',
+    JSON.stringify(zoomed.images));
+  check(zoomed.images.every(url => url.indexOf('_s.jpg') < 0 && url.indexOf('_l.jpg') < 0),
+    "the thumbnail's own size and the frame's copy of a photograph are not sent as well",
+    JSON.stringify(zoomed.images));
+  check(zoomed.note === '',
+    'and a gallery the markup already held whole needs nothing from the page data', zoomed.note);
+
+  // The strip on this site is built by its JavaScript, so the HTML a `fetch` returns can hold the frame
+  // and an *empty* `ul.mediaThumbnails` — the addresses only exist in the data blob the script fills it
+  // from. A lot's photographs share the lot's own folder, so those are taken; the logo in `/assets/` and
+  // the neighbouring lot in `/lot/1187/` are not.
+  const jsStripHTML = [
+    '<html><head>',
+    '<script>window.lotMedia = ["' + lotFolder + '112175_l.jpg?ts=1790278592",'
+      + '"' + lotFolder + '112176_l.jpg?ts=1790278593",'
+      + '"' + lotFolder + '112177_l.jpg?ts=1790278594",'
+      + '"' + lotFolder + '112178_l.jpg?ts=1790278595",'
+      + '"' + lotFolder + '112179_l.jpg?ts=1790278596",'
+      + '"' + lotFolder + '112180_l.jpg?ts=1790278597",'
+      + '"' + lotFolder + '112181_l.jpg?ts=1790278597",'
+      + '"' + lotFolder + '112182_l.jpg?ts=1790278598",'
+      + '"' + lotFolder + '112183_l.jpg?ts=1790278599",'
+      + '"' + lotFolder + '112184_l.jpg?ts=1790278599",'
+      + '"' + lotFolder + '112185_l.jpg?ts=1790278600",'
+      + '"https://bids.palletauctions.com/assets/logo.png",'
+      + '"https://bids.palletauctions.com/images/lot/1187/118701_l.jpg?ts=8"];</script>',
+    '</head><body>',
+    '<div class="auc_slide left">',
+    '<a class="MagicZoom" href="' + lotFolder + '112175_xl.jpg?ts=1790278593">',
+    '<img src="' + lotFolder + '112175_l.jpg?ts=1790278592"></a>',
+    '<div class="carouselSlider"><ul class="mediaThumbnails"></ul></div>',
+    '</div>',
+    '</body></html>'
+  ].join('');
+
+  const built = JSON.parse(
+    await scrape({}, { api: true, detail: { html: jsStripHTML } })
+      .lotPageImages('https://bids.palletauctions.com/auction/lot/1121')
+  );
+  const expected = [lotFolder + '112175_xl.jpg?ts=1790278593'];
+  for (let index = 1; index < strip.length; index += 1) {
+    expected.push(lotFolder + strip[index][0] + '_l.jpg?ts=' + strip[index][2]);
+  }
+  check(built.ok === true && built.images.length === 11,
+    'a strip the site builds in JavaScript is read from the page data it is built from',
+    JSON.stringify(built.images));
+  check(built.images.join(' ') === expected.join(' '),
+    "the frame stays first and keeps the size it opens at; the rest arrive in the data blob's order",
+    JSON.stringify(built.images));
+  check(built.images.every(url => url.indexOf('/1187/') < 0 && url.indexOf('logo') < 0),
+    "another lot's photographs and the site's logo live in their own folders and are left alone",
+    JSON.stringify(built.images));
+  check(built.note === 'the page data supplied 10 more photograph(s) than the gallery markup held',
+    'and the log says where the extra photographs came from', built.note);
+
+  // The description column: what the lot actually holds, rather than the card's teaser. The heading is
+  // page furniture and the whitespace is the markup's, so both are cleaned off — and the column's other
+  // furniture, the bid box and the "ask a question" form, must stay out of the copy.
+  check(report.description === 'Lot 208 \u2014 a pallet of mixed kitchen appliances. '
+    + 'Includes 6x Ninja BL610 blenders, UPC 622356528163, and 4x Instant Pot Duo 6qt.',
+    'the description block is read whole, heading stripped and whitespace condensed',
+    JSON.stringify(report.description));
+  check(report.descriptionSelector === 'div.active.ins_cnt.description-info-content',
+    'and the report names the rule that found it', report.descriptionSelector);
+  check(report.description.indexOf('Current bid') < 0 && report.description.indexOf('Ask a question') < 0,
+    "the column's other furniture is not mistaken for the copy", JSON.stringify(report.description));
 
   const request = page.__fetches[0];
   check(request && request.url === 'https://lots.example.test/auction/lot/208',
@@ -575,11 +850,52 @@ const galleryHTML = [
   check(stillScraping.lots[0].imageURLStrings.length === 1,
     'the listing on the page still scrapes exactly as before', JSON.stringify(stillScraping.lots[0].imageURLStrings));
 
+  // A gallery built in JavaScript leaves no container to scope to, so *then* the page's declared lead
+  // image and its data blobs are consulted, and the note says which of the two paths was taken.
+  const declaredHTML = [
+    '<html><head>',
+    '<meta property="og:image" content="https://cdn.example.test/og/208.jpg">',
+    '<script>window.__DATA = {"photos":["https://cdn.example.test/json/208.jpg"]};</script>',
+    '</head><body><div class="auc_info right"><h3>Description</h3><p>Mixed appliances.</p></div></body></html>'
+  ].join('');
+  const declared = JSON.parse(
+    await scrape({}, { api: true, detail: { html: declaredHTML } })
+      .lotPageImages('https://lots.example.test/auction/lot/208')
+  );
+  check(declared.images.length === 2, 'with no gallery markup, the declared images are used',
+    JSON.stringify(declared.images));
+  check(declared.images.indexOf('https://cdn.example.test/og/208.jpg') >= 0
+    && declared.images.indexOf('https://cdn.example.test/json/208.jpg') >= 0,
+    'both the meta tag and the script blob', JSON.stringify(declared.images));
+  check(typeof declared.note === 'string' && declared.note.indexOf('no gallery container') >= 0,
+    'and the note explains that the gallery itself was never found', JSON.stringify(declared.note));
+  check(declared.description === 'Mixed appliances.',
+    'the description column is still read on a page with no gallery',
+    JSON.stringify(declared.description));
+
+  // The description ladder is a ladder: the column that contains the copy is the next rule up, so a
+  // page whose own block carries no class still yields text rather than nothing.
+  const columnHTML = [
+    '<html><body><div class="auc_info right">',
+    '<div class="bid-box">Current bid: $90.00</div>',
+    '<div>Lot 300 \u2014 12x assorted power tools, untested.</div>',
+    '</div></body></html>'
+  ].join('');
+  const fromColumn = JSON.parse(
+    await scrape({}, { api: true, detail: { html: columnHTML } })
+      .lotPageImages('https://lots.example.test/auction/lot/300')
+  );
+  check(fromColumn.description.indexOf('12x assorted power tools') >= 0,
+    'a page with no named description block still yields its copy', JSON.stringify(fromColumn.description));
+  check(fromColumn.descriptionSelector === 'div.auc_info.right',
+    'from the column rule, named in the report', fromColumn.descriptionSelector);
+
   // A page that cannot be read is reported, never fatal: the scan then falls back to the card.
   const failing = scrape({}, { api: true, detail: { fails: 'Failed to fetch' } });
   const failed = JSON.parse(await failing.lotPageImages('https://lots.example.test/auction/lot/208'));
   check(failed.ok === false && failed.error === 'Failed to fetch', 'an unreachable page reports why', JSON.stringify(failed));
   check(failed.images.length === 0, 'and offers no images at all', JSON.stringify(failed.images));
+  check(!failed.description, 'and no description to build a prompt from', JSON.stringify(failed.description));
 
   const missing = JSON.parse(
     await scrape({}, { api: true, detail: { status: 404 } })
@@ -605,6 +921,8 @@ const galleryHTML = [
   check(empty.ok === true && empty.images.length === 0, 'a page with no photographs answers with none', JSON.stringify(empty));
   check(typeof empty.note === 'string' && empty.note.length > 0,
     'and says so, instead of looking like a failure', JSON.stringify(empty.note));
+  check(empty.description === '' && empty.descriptionSelector === '',
+    'as does a page with no description column', JSON.stringify(empty));
 
   console.log(failures.length === 0 ? '\nPAGE-SIDE CHECKS PASSED' : '\n' + failures.length + ' PAGE-SIDE CHECK(S) FAILED');
   process.exit(failures.length === 0 ? 0 : 1);

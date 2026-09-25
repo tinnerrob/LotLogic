@@ -259,8 +259,10 @@ struct PageDiagnostics: Codable, Sendable {
 /// Reply from `window.__PAS.lotPageImages(url)`.
 ///
 /// One lot's own page, read *through* the loaded listing so the request carries the operator's
-/// session, then parsed off-screen. `images` is every photograph the page mentions — however many
-/// that is, because the count is the lot's business rather than a setting (see deviation 24).
+/// session, then parsed off-screen. `images` is every photograph the lot's own gallery shows —
+/// however many that is, because the count is the lot's business rather than a setting (see
+/// deviation 24) — and `description` is the listing's own copy, which a card only ever teasers.
+/// `descriptionSelector` says which rule in the profile found it, for the log.
 ///
 /// An unreadable page is reported, not thrown: a lot whose page cannot be read is still appraised
 /// from the thumbnails its card carried, and `note` / `error` are what let the log say which
@@ -269,6 +271,11 @@ struct LotPageImages: Codable, Sendable {
     var ok: Bool
     var url: String
     var images: [String]
+    /// The page's description text, already whitespace-condensed. Absent or empty when the page had
+    /// no description column, in which case the card's own text stands.
+    var description: String?
+    /// The profile selector that yielded the description, for the activity log.
+    var descriptionSelector: String?
     var note: String?
     var error: String?
 
@@ -277,8 +284,14 @@ struct LotPageImages: Codable, Sendable {
     /// One line for the activity log.
     var summary: String {
         guard ok else { return "the lot page could not be read (\(error ?? "no reason given"))" }
-        if let note, !note.isEmpty { return note }
-        return "\(images.count) image(s) on the lot page"
+        var facts = ["\(images.count) image(s) on the lot page"]
+        if let description, !description.isEmpty {
+            facts.append("description \(description.count) char(s)")
+        } else {
+            facts.append("no description")
+        }
+        if let note, !note.isEmpty { facts.append(note) }
+        return facts.joined(separator: ", ")
     }
 }
 

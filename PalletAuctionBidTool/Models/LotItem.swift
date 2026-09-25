@@ -243,6 +243,23 @@ final class LotItem: Identifiable {
 
     // MARK: Pipeline mutations
 
+    /// Records the listing's own description, read from the lot's page.
+    ///
+    /// A card only carries a teaser — "Pallet of General Merchandise" — so the text a prompt is built
+    /// from is taken from the page's description column when the page can be read, and the card's
+    /// teaser is what stands when it cannot. Empty text is read as "the page had none" and changes
+    /// nothing: a page read that yields no description must not blank the copy the card *did* carry,
+    /// because that text is what the expanded row shows and what a later retry starts from.
+    ///
+    /// - Returns: `true` when the description actually changed.
+    @discardableResult
+    func applyLotPageDescription(_ text: String) -> Bool {
+        let cleaned = text.condensedWhitespace
+        guard !cleaned.isEmpty, cleaned != rawDescription else { return false }
+        rawDescription = cleaned
+        return true
+    }
+
     /// Applies a successful valuation pass, recomputing the pallet totals.
     ///
     /// The pre-price is retired here: the scanned numbers replace it outright, so nothing on the

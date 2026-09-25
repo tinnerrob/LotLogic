@@ -91,6 +91,9 @@ enum ScraperScript {
       // profile's business, since it differs per site: `nonLotHrefPattern`.
       const HREF_JUNK_PATTERN = /^(?:#|javascript:|mailto:|tel:|data:|blob:)/i;
       const HREF_ASSET_PATTERN = /\.(?:jpe?g|png|gif|webp|heic|avif|bmp|svg|ico|css|js|mjs|json|xml|pdf|zip|mp4|webm|mp3|wav|ogg|woff2?)(?:$|[?#])/i;
+      // An address that *is* an image, as opposed to a page that shows one: what a gallery's thumbnails
+      // open, and therefore what a scan should be handed rather than the thumbnail itself.
+      const IMAGE_ADDRESS_PATTERN = /\.(?:jpe?g|png|gif|webp|heic|avif|bmp|tiff?)(?:$|[?#])/i;
       const NON_LOT_HREF_PATTERN = (function () {
         try { return new RegExp(CONFIG.nonLotHrefPattern || '$^', 'i'); } catch (error) { return /$^/; }
       })();
@@ -431,61 +434,257 @@ enum ScraperScript {
         } catch (error) { return raw; }
       }
 
-      // Every image address a root mentions, in the order it mentions them.
+      // What makes two addresses the *same photograph*.
       //
-      // - `root` is a card element or a whole parsed document.
+      // A gallery prints one photograph at several sizes and in several places — the strip's thumbnail,
+      // the frame's copy of it, the address the thumbnail opens — and each of those is a different URL:
+      // a lot with eight photographs can hand over seventeen addresses for them, which is seventeen
+      // photographs' worth of payload and an invitation to count the same carton twice. Identity strips
+      // the variant folder, the size suffix, the `@2x` marker and the query string, leaving the file the
+      // site actually stores. Two *different* photographs do not share a name, so nothing real is merged.
+      function photoIdentity(url) {
+        let text = String(url || '').toLowerCase().split('#')[0].split('?')[0];
+        text = text.replace(/\/(?:thumbnails?|thumbs?|small|sm|mini|medium|md|previews?|resized?|resize|cache|large|big|full|original|orig|zoom|xl|xlarge|hires|highres|display)\//g, '/');
+        text = text.replace(/@\d+x(?=\.[a-z0-9]+$)/, '');
+        text = text.replace(/[_-]\d{2,4}x\d{2,4}(?=\.[a-z0-9]+$)/, '');
+        text = text.replace(/[_-](?:thumbnails?|thumbs?|small|sm|mini|medium|md|previews?|large|big|full|orig|original|zoom|xl)(?=\.[a-z0-9]+$)/, '');
+        // A site that prints one photograph at three sizes under one name — `112184_s.jpg` for the
+        // strip, `112184_l.jpg` for the frame, `112184_xl.jpg` for the copy the thumbnail opens — puts
+        // the photograph in the *digits* and the size in a single-letter code. So a size code is
+        // stripped when it follows a number, which is what makes those three one photograph rather than
+        // three. The digit is what keeps it honest: `pallet_s.jpg` and `pallet_l.jpg` are left alone,
+        // because a name that does not end in a numbered photograph has not declared a size variant.
+        text = text.replace(/(\d)[_-](?:xxs|xs|sm|md|med|lg|x{1,2}l|[smlt])(?=\.[a-z0-9]+$)/, '$1');
+        return text;
+      }
+
+      // How good one address is: a full-size original beats a resized copy of it, and the copy a
+      // thumbnail *opens* beats the thumbnail itself. Used both to choose between the alternatives one
+      // element offers and to let a better address replace an earlier one for the same photograph.
+      //
+      // Scored over the *resolved* address as well as the printed one: the upgrade rewrites a `thumb`
+      // folder or a `?w=300` the page happened to use, so a size claim that survives it is a size the
+      // site really serves, while a name that already said `-large` is worth preferring over one that
+      // had to be upgraded into it.
+      function imageScore(raw, base, hint) {
+        const printed = String(raw || '');
+        const resolved = absolute(upgradeImageURL(printed, base), base) || printed;
+        const both = printed + ' ' + resolved;
+        let score = 0;
+        if (hint === 'opened') score += 300;
+        if (hint === 'large') score += 200;
+        if (hint === 'srcset') score += 100;
+        if (/(^|[/_.-])(?:large|full|original|orig|big|zoom|xl|xlarge|hires|highres|max)(?=[/_.-]|$)/i.test(both)) score += 150;
+        if (/(^|[/_.-])(?:thumbnails?|thumbs?|small|sm|mini|medium|md|previews?)(?=[/_.-]|$)/i.test(both)) score -= 100;
+        const declared = resolved.match(/(?:\/|=|-|_)(\d{2,4})x(\d{2,4})(?:[./?&]|$)/);
+        if (declared) score += Math.min(Math.max(parseInt(declared[1], 10), parseInt(declared[2], 10)), 4000);
+        const width = resolved.match(/[?&](?:w|width)=(\d{1,5})/i);
+        if (width) score += Math.min(parseInt(width[1], 10), 4000);
+        return score;
+      }
+
+      // An attribute that names a big variant, and so is worth preferring over its siblings.
+      function hintForAttribute(attribute) {
+        const name = String(attribute || '').toLowerCase();
+        if (name.indexOf('srcset') >= 0) return 'srcset';
+        if (/large|full|orig|zoom|big|max|hires|highres/.test(name)) return 'large';
+        return '';
+      }
+
+      // The one address an image element offers.
+      //
+      // An element's attributes are *alternatives*, not additions: `src` is the copy the page happens to
+      // show, `data-large_image` is the one behind it, and both are the same photograph. The best of
+      // them wins, so a thumbnail that carries its full-size address is sent at full size — and sent
+      // once.
+      function bestImageOf(element, base) {
+        const attributes = CONFIG.imageAttributeCandidates || [];
+        let best = null;
+        let bestScore = -Infinity;
+        for (let index = 0; index < attributes.length; index += 1) {
+          const value = element.getAttribute(attributes[index]);
+          if (!value) continue;
+          const hint = hintForAttribute(attributes[index]);
+          const candidate = hint === 'srcset' ? bestFromSrcset(value) : value;
+          if (!candidate) continue;
+          const score = imageScore(String(candidate), base, hint);
+          if (score > bestScore) { bestScore = score; best = { value: candidate, hint: hint }; }
+        }
+        return best;
+      }
+
+      // The one address a gallery *slot* offers.
+      //
+      // A thumbnail strip is `<a href="big.jpg"><img src="thumb.jpg"></a>`: the anchor is what the
+      // viewer opens — the photograph a carousel that shows one frame at a time actually holds — and the
+      // `<img>` inside it is the same photograph at thumbnail size. Whichever of the two is the better
+      // address is the photograph; taking both is how eight photographs become sixteen requests.
+      function bestImageOfSlot(anchor, base) {
+        const href = anchor.getAttribute('href');
+        let best = href ? { value: href, hint: 'opened' } : null;
+        let bestScore = best ? imageScore(best.value, base, best.hint) : -Infinity;
+        const inner = each(anchor, 'img');
+        for (let index = 0; index < inner.length; index += 1) {
+          const candidate = bestImageOf(inner[index], base);
+          if (!candidate) continue;
+          const score = imageScore(String(candidate.value), base, candidate.hint);
+          if (score > bestScore) { bestScore = score; best = candidate; }
+        }
+        return best;
+      }
+
+      // The one address a `<picture>` offers: its `<source>` alternatives and the `<img>` that stands
+      // behind them are copies of one photograph, so the best of them is the photograph.
+      function bestImageOfPicture(picture, base) {
+        let best = null;
+        let bestScore = -Infinity;
+        const candidates = each(picture, 'source[srcset], source[data-srcset]');
+        for (let index = 0; index < candidates.length; index += 1) {
+          const value = bestFromSrcset(candidates[index].getAttribute('srcset')
+            || candidates[index].getAttribute('data-srcset'));
+          if (!value) continue;
+          const score = imageScore(value, base, 'srcset');
+          if (score > bestScore) { bestScore = score; best = value; }
+        }
+        const inner = each(picture, 'img');
+        for (let index = 0; index < inner.length; index += 1) {
+          const candidate = bestImageOf(inner[index], base);
+          if (!candidate) continue;
+          const score = imageScore(String(candidate.value), base, candidate.hint);
+          if (score > bestScore) { bestScore = score; best = candidate.value; }
+        }
+        return best;
+      }
+
+      // Whether an element sits inside one of these. `contains` is the one containment test a browser
+      // and the offline DOM check agree on.
+      function insideAny(element, ancestors) {
+        for (let index = 0; index < ancestors.length; index += 1) {
+          if (ancestors[index].contains(element)) return true;
+        }
+        return false;
+      }
+
+      // A junk-filtered, de-duplicating address list in which one *photograph* is one entry.
+      //
+      // One place decides what a usable photograph is: absolute, upgraded off a CDN thumbnail, not one
+      // of the layout's own props (a spacer, a 1×1 pixel, a spinner, a sprite), and not a second copy of
+      // a photograph already listed at another size. A card's strip, a gallery container and a page's
+      // declared lead image all push through one of these, so the rules cannot drift apart between them.
+      function imageListBuilder(base) {
+        const urls = [];
+        const scores = [];
+        const indexByIdentity = {};
+        // The layout's own props rather than photographs: spacers and pixels, spinners, sprites, an SVG
+        // (an icon, never a photograph), and the controls a carousel keeps in the very container the
+        // gallery is read from — the arrows, the close button, the magnifier. Each is matched as a whole
+        // token, so `preview.jpg` is a photograph while `prev.jpg` is a button.
+        const ignored = /placeholder|spacer|blank\.|1x1|pixel\.(gif|png)|loading|spinner|no[-_]?image|sprite|watermark|\.svg(?:$|[?#])|(?:^|[/_.-])(?:arrow|chevron|caret|prev|next|close|expand|collapse|magnify|magnifier|icon|nav|button|btn|zoom[-_](?:in|out|icon))([/_.-]|$)/i;
+        return {
+          urls: urls,
+          // `hint` says where the address came from — the copy a gallery opens, an attribute naming a
+          // big variant, a srcset candidate — which is what breaks a tie between two copies of one
+          // photograph. A better copy replaces the earlier one in place, so an album's order survives.
+          push: function (raw, hint) {
+            if (!raw) return;
+            const resolved = absolute(upgradeImageURL(String(raw), base), base);
+            if (!resolved || ignored.test(resolved)) return;
+            const identity = photoIdentity(resolved);
+            const score = imageScore(String(raw), base, hint);
+            const existing = indexByIdentity[identity];
+            if (existing !== undefined) {
+              if (score > scores[existing]) { urls[existing] = resolved; scores[existing] = score; }
+              return;
+            }
+            indexByIdentity[identity] = urls.length;
+            scores.push(score);
+            urls.push(resolved);
+          }
+        };
+      }
+
+      // Every image address the markup *inside* `root` mentions, in the order it mentions them,
+      // appended to `list`.
+      //
+      // One element is one photograph, so this walks the elements in document order and decides what
+      // each one contributes:
+      //
+      // * an `<a>` whose address *is* an image is a gallery slot — the photograph a thumbnail opens —
+      //   and the `<img>` inside it is the same photograph at thumbnail size, so the slot contributes
+      //   whichever of the two is the better address and nothing else;
+      // * an `<img>` outside such a link contributes its own best address (`src`, `data-src`, a
+      //   `data-large_image` standing behind a thumbnail) rather than one entry per attribute;
+      // * a `<picture>` is a set of alternatives for one photograph, so its `source`s and its `img`
+      //   are compared and the best one wins;
+      // * a `style` attribute's `url(...)` is a photograph too, when a layout paints one in.
+      //
+      // Document order is the album's own order — the frame's photograph first, then the strip — which
+      // is what a payload budget trims against, so walking the elements in the order the page prints
+      // them matters. A container always precedes what it holds, so the sets of slots and pictures are
+      // complete by the time the elements inside them are reached.
+      //
+      // - `root` is a card element, a gallery container, or a whole parsed document.
       // - `base` is what relative addresses resolve against — the card's page, or the lot page that
       //   was fetched. Without it a gallery's `/images/12.jpg` would be joined onto the *listing's*
       //   address and 404.
       // - `extras` are further candidate addresses from outside the markup (a `og:image` meta, a URL
-      //   inside a JSON blob), which go through the same junk filter and de-duplication.
-      // - `uncapped` is the difference between a card and a lot's own page: a card's strip is bounded
-      //   by `maxCardImages`, while a lot page is read in full because how many photographs a lot has
-      //   is the lot's business, not a setting.
-      function collectImages(root, base, extras, uncapped) {
-        const urls = [];
-        const seen = {};
-        const ignored = /placeholder|spacer|blank\.|1x1|pixel\.(gif|png)|loading|spinner|no[-_]?image|sprite/i;
-        const push = function (raw) {
-          if (!raw) return;
-          const resolved = absolute(upgradeImageURL(String(raw), base), base);
-          if (!resolved || ignored.test(resolved)) return;
-          if (seen[resolved] === true) return;
-          seen[resolved] = true;
-          urls.push(resolved);
-        };
+      //   inside a JSON blob), which go through the same filter and de-duplication.
+      function collectImagesInto(list, root, base, extras) {
+        const push = list.push;
+        const anchors = each(root, 'a[href]');
         const images = each(root, 'img');
-        for (let imageIndex = 0; imageIndex < images.length; imageIndex += 1) {
-          const image = images[imageIndex];
-          for (let attributeIndex = 0; attributeIndex < CONFIG.imageAttributeCandidates.length; attributeIndex += 1) {
-            const attribute = CONFIG.imageAttributeCandidates[attributeIndex];
-            const value = image.getAttribute(attribute);
-            if (!value) continue;
-            if (attribute.toLowerCase().indexOf('srcset') >= 0) push(bestFromSrcset(value));
-            else push(value);
+        const pictures = each(root, 'picture');
+        const sources = each(root, 'source[srcset], source[data-srcset]');
+        const slots = [];
+        const elements = each(root, '*');
+        for (let index = 0; index < elements.length; index += 1) {
+          const element = elements[index];
+          if (anchors.indexOf(element) >= 0) {
+            const href = String(element.getAttribute('href') || '');
+            if (!IMAGE_ADDRESS_PATTERN.test(href)) continue;
+            slots.push(element);
+            const best = bestImageOfSlot(element, base);
+            if (best) push(best.value, best.hint);
+            continue;
           }
-          if (String(image.getAttribute('src') || '').trim() === '') push(image.getAttribute('data-src'));
-        }
-        const sources = each(root, 'picture source, source[srcset], source[data-srcset]');
-        for (let index = 0; index < sources.length; index += 1) {
-          push(bestFromSrcset(sources[index].getAttribute('srcset') || sources[index].getAttribute('data-srcset')));
-        }
-        const styled = each(root, '[style*="background"]');
-        for (let index = 0; index < styled.length; index += 1) {
-          const declaration = styled[index].getAttribute('style') || '';
+          if (images.indexOf(element) >= 0) {
+            // An `<img>` that is only the thumbnail of a slot has been counted with its slot, and one
+            // inside a `<picture>` belongs to that picture.
+            if (insideAny(element, slots) || insideAny(element, pictures)) continue;
+            const best = bestImageOf(element, base);
+            if (best) push(best.value, best.hint);
+            continue;
+          }
+          if (pictures.indexOf(element) >= 0) {
+            const best = bestImageOfPicture(element, base);
+            if (best) push(best, 'srcset');
+            continue;
+          }
+          if (sources.indexOf(element) >= 0) {
+            if (insideAny(element, pictures)) continue;
+            push(bestFromSrcset(element.getAttribute('srcset') || element.getAttribute('data-srcset')), 'srcset');
+            continue;
+          }
+          const declaration = String(element.getAttribute('style') || '');
+          if (declaration.indexOf('background') < 0) continue;
           const match = declaration.match(/url\(\s*['"]?([^'")]+)['"]?\s*\)/i);
           if (match) push(match[1]);
-        }
-        const anchors = each(root, 'a[href]');
-        for (let index = 0; index < anchors.length; index += 1) {
-          const href = anchors[index].getAttribute('href') || '';
-          if (/\.(jpe?g|png|webp|heic|gif)(\?|$)/i.test(href)) push(href.split('?')[0]);
         }
         if (extras) {
           for (let index = 0; index < extras.length; index += 1) push(extras[index]);
         }
-        if (uncapped) return urls;
-        return urls.slice(0, Math.max(1, CONFIG.maxCardImages));
+      }
+
+      // One root's addresses as a finished list.
+      //
+      // - `uncapped` is the difference between a card and a lot's own gallery: a card's strip is
+      //   bounded by `maxCardImages`, while a gallery is read in full because how many photographs a
+      //   lot has is the lot's business, not a setting.
+      function collectImages(root, base, extras, uncapped) {
+        const list = imageListBuilder(base);
+        collectImagesInto(list, root, base, extras);
+        if (uncapped) return list.urls;
+        return list.urls.slice(0, Math.max(1, CONFIG.maxCardImages));
       }
 
       // ----------------------------------------------------------------- lot page
@@ -528,29 +727,147 @@ enum ScraperScript {
         return found;
       }
 
-      // The addresses that are not in the markup: a page's declared lead image, then anything the
-      // script blobs mention. Both are extras, so the markup scan stays the primary source.
-      function lotPageExtraImages(document) {
-        const extras = [];
+      // The folder a photograph lives in — everything up to its last slash, without the query string.
+      function imageFolder(url) {
+        const text = String(url || '').split('#')[0].split('?')[0];
+        const cut = text.lastIndexOf('/');
+        return cut > 0 ? text.slice(0, cut).toLowerCase() : '';
+      }
+
+      // Photographs the page declares but the markup does not hold, appended to `list` and counted.
+      //
+      // The strip on the catalogue this tool targets is built *in JavaScript*: the page ships an empty
+      // `ul.mediaThumbnails` and the script fills it, so a fetch of the page's own HTML finds the frame
+      // and nothing else. The addresses are still on the page — in the data blob the script reads them
+      // from — and a lot's photographs all live in that lot's own folder, while everything else a page
+      // mentions (another lot in the "recently viewed" rail, the logo, the promotion banner) lives in
+      // its own. So a declared address is taken exactly when it shares a folder with a photograph the
+      // gallery containers already produced, which is what keeps a neighbouring lot out of the count.
+      function declaredSiblingImages(list, document) {
+        const folders = [];
+        for (let index = 0; index < list.urls.length; index += 1) {
+          const folder = imageFolder(list.urls[index]);
+          if (folder && folders.indexOf(folder) < 0) folders.push(folder);
+        }
+        if (folders.length === 0) return 0;
+        const before = list.urls.length;
+        const declared = imageURLsInScripts(document);
+        for (let index = 0; index < declared.length; index += 1) {
+          if (folders.indexOf(imageFolder(declared[index])) >= 0) list.push(declared[index], 'declared');
+        }
+        return list.urls.length - before;
+      }
+
+      // The addresses that are not in the markup at all: a page's declared lead image, then anything
+      // its script blobs mention.
+      //
+      // A last resort, not a companion. A page that has a gallery has the lot's own photographs in it,
+      // while everything else a page names — the header logo, a promotion banner, a "recently viewed"
+      // rail, the neighbouring lots a footer links to — belongs to somebody else, and a vision model
+      // asked to price a promotion banner will price it. So this list is consulted only when the
+      // gallery containers matched nothing at all, which is the JavaScript-rendered-gallery case.
+      function lotPageFallbackImages(document, base) {
+        const list = imageListBuilder(base);
         for (let index = 0; index < CONFIG.imageMetaSelectors.length; index += 1) {
           const metas = each(document, CONFIG.imageMetaSelectors[index]);
           for (let metaIndex = 0; metaIndex < metas.length; metaIndex += 1) {
-            extras.push(attributeOf(metas[metaIndex], ['content', 'href']));
+            list.push(attributeOf(metas[metaIndex], ['content', 'href']));
           }
         }
         const scripts = imageURLsInScripts(document);
-        for (let index = 0; index < scripts.length; index += 1) extras.push(scripts[index]);
-        return extras;
+        for (let index = 0; index < scripts.length; index += 1) list.push(scripts[index]);
+        return list.urls;
       }
 
-      // Every image one lot's page mentions. Deliberately uncapped.
+      // Every photograph the lot's own **gallery** shows, and nothing else on the page.
+      //
+      // The page is not the lot. A lot page also carries the site's logo, its promotion carousel, a
+      // "recently viewed" strip and links to the other lots in the same catalogue, and none of those
+      // are this lot. So the scan is scoped to the containers the profile names — the main slide, then
+      // the thumbnail strip — each contributing in the order it is named, so a gallery split across two
+      // elements is read whole. Deliberately uncapped: how many photographs a lot has is the lot's
+      // business rather than a setting (see deviation 24). What is bounded is *repetition*: the strip's
+      // thumbnail and the copy the frame shows are one photograph (see `photoIdentity`), and a container
+      // another selector already covered is not read twice.
+      //
+      // Returns the addresses *and* the note that explains an empty one, because "the gallery carried
+      // no photographs" and "there was no gallery markup" are different things to read in the log.
       function collectLotPageImages(document, base) {
-        return collectImages(document, base, lotPageExtraImages(document), true);
+        const list = imageListBuilder(base);
+        const selectors = CONFIG.lotPageGallerySelectors || [];
+        const visited = [];
+        let containers = 0;
+        for (let index = 0; index < selectors.length; index += 1) {
+          const roots = each(document, selectors[index]);
+          containers += roots.length;
+          for (let rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
+            // A broader selector can match a container a narrower one already covered — the thumbnail
+            // strip lives inside the frame — and reading the insides of both would walk those
+            // photographs twice. So anything already inside a container that has been read is skipped
+            // rather than de-duplicated after the fact.
+            if (insideAny(roots[rootIndex], visited)) continue;
+            visited.push(roots[rootIndex]);
+            collectImagesInto(list, roots[rootIndex], base, null);
+          }
+        }
+        if (list.urls.length > 0) {
+          // The containers hold the gallery, but a strip the site builds in JavaScript is not in the
+          // HTML at all — see `declaredSiblingImages`, which takes the addresses the page declares when
+          // they live in the same folder as a photograph already found.
+          const added = declaredSiblingImages(list, document);
+          return {
+            images: list.urls,
+            note: added > 0
+              ? 'the page data supplied ' + added + ' more photograph(s) than the gallery markup held'
+              : ''
+          };
+        }
+        const declared = lotPageFallbackImages(document, base);
+        if (declared.length > 0) {
+          return {
+            images: declared,
+            note: 'no gallery container matched — ' + declared.length + ' declared image(s) used instead'
+          };
+        }
+        return {
+          images: [],
+          note: containers > 0
+            ? 'the gallery carried no photographs'
+            : 'the page carried no gallery markup'
+        };
       }
 
-      // Reads one lot's own page. Resolves to a JSON string like every other public entry point, so
-      // the Swift side keeps its single decode path; a page that cannot be read answers `ok:false`
-      // with the reason instead of rejecting.
+      // The listing's own description, read off the lot's page.
+      //
+      // A card carries a teaser — "Pallet of General Merchandise" — so a text estimate built from a
+      // card is a guess about a guess. The page's description column is where the site prints what the
+      // lot actually holds: brands, model numbers, counts, condition wording. The first selector that
+      // yields text wins, which is why the profile names the description block itself before the
+      // column containing it (the bid box, the countdown and the "ask a question" form sit beside it).
+      function lotPageDescription(document) {
+        const selectors = CONFIG.lotPageDescriptionSelectors || [];
+        for (let index = 0; index < selectors.length; index += 1) {
+          const found = each(document, selectors[index]);
+          for (let foundIndex = 0; foundIndex < found.length; foundIndex += 1) {
+            const text = stripDescriptionHeading(textOf(found[foundIndex]));
+            if (text) return { text: text, selector: selectors[index] };
+          }
+        }
+        return { text: '', selector: '' };
+      }
+
+      // The block usually prints its own heading as its first line ("Description", "Lot Description",
+      // "Item description:"), which is page furniture rather than part of the copy.
+      function stripDescriptionHeading(text) {
+        return String(text || '')
+          .replace(/^(?:lot|item|auction|product)\s+description\s*[:\-\u2013]?\s*/i, '')
+          .replace(/^description\s*[:\-\u2013]?\s*/i, '')
+          .trim();
+      }
+
+      // Reads one lot's own page: its gallery *and* its description. Resolves to a JSON string like
+      // every other public entry point, so the Swift side keeps its single decode path; a page that
+      // cannot be read answers `ok:false` with the reason instead of rejecting.
       function lotPageImages(url) {
         const target = absolute(url);
         if (!target) {
@@ -558,6 +875,7 @@ enum ScraperScript {
             ok: false,
             url: String(url || ''),
             images: [],
+            description: '',
             error: 'unusable lot page address'
           }));
         }
@@ -579,18 +897,24 @@ enum ScraperScript {
           return response.text();
         }).then(function (html) {
           const parsed = new DOMParser().parseFromString(String(html || ''), 'text/html');
-          const images = collectLotPageImages(parsed, target);
-          log('lot page ' + target + ': ' + images.length + ' image(s)');
+          const gallery = collectLotPageImages(parsed, target);
+          const description = lotPageDescription(parsed);
+          log(
+            'lot page ' + target + ': ' + gallery.images.length + ' image(s), '
+              + (description.text ? 'description ' + description.text.length + ' char(s)' : 'no description')
+          );
           return JSON.stringify({
             ok: true,
             url: target,
-            images: images,
-            note: images.length === 0 ? 'the page carried no photographs' : ''
+            images: gallery.images,
+            description: description.text,
+            descriptionSelector: description.selector,
+            note: gallery.note
           });
         }).catch(function (error) {
           const message = String((error && error.message) || error);
           log('lot page ' + target + ' failed: ' + message);
-          return JSON.stringify({ ok: false, url: target, images: [], error: message });
+          return JSON.stringify({ ok: false, url: target, images: [], description: '', error: message });
         }).then(function (result) {
           window.clearTimeout(timer);
           return result;
