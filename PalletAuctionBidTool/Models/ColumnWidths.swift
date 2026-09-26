@@ -17,8 +17,8 @@ import CoreGraphics
 /// the cases, and keeps the title, the sort order behind it and the shipped width in one place.
 ///
 /// Every case here can also be hidden from the table's gear (see `ColumnVisibility`): this enum is
-/// the data, and the fixed chrome — the chevron and the **Eval** / **Price** / **Open** buttons —
-/// is deliberately not a case, so it is not something the chooser can take away.
+/// the data, and the fixed chrome — the row checkboxes, the chevron and the **Eval** / **Price** /
+/// **Open** buttons — is deliberately not a case, so it is not something the chooser can take away.
 enum LotColumnKey: String, CaseIterable, Identifiable, Sendable {
 
     case lotNumber
@@ -104,6 +104,15 @@ enum LotColumnKey: String, CaseIterable, Identifiable, Sendable {
 
 /// Columns that are fixed chrome rather than data, plus the geometry the drag grips share.
 enum LotColumn {
+
+    /// The row checkboxes: the header's own box and the one on every pallet row, sharing a column so
+    /// the two line up.
+    ///
+    /// Fixed chrome rather than a data column, on the same reasoning as the buttons: the boxes are a
+    /// control, not a number, and the two **…selected** buttons cannot be built without them — so the
+    /// gear has no switch for it, and it is never stretched by `ColumnWidths.filling(_:)`. Narrower
+    /// than the chevron beside it because a checkbox is aimed at rather than read.
+    static let selection: CGFloat = 24
 
     /// Disclosure chevron. Fixed: resizing it would only misalign the rows against the header.
     static let expander: CGFloat = 20
@@ -318,9 +327,9 @@ struct ColumnWidths: Equatable, Sendable {
     /// Wider than the table: the columns being drawn share the slack in proportion to their own
     /// width, so the table spans the window instead of leaving a dead strip beside the last column.
     /// Hiding a column hands its width to the ones that remain, because the slack is measured from
-    /// `totalWidth` and that is the *drawn* total. The fixed chrome — the chevron, the
-    /// **Eval** / **Price** / **Open** buttons and the row insets — is never stretched: those are
-    /// controls, not numbers, and widening them would only push the data further right.
+    /// `totalWidth` and that is the *drawn* total. The fixed chrome — the row checkboxes, the
+    /// chevron, the **Eval** / **Price** / **Open** buttons and the row insets — is never stretched:
+    /// those are controls, not numbers, and widening them would only push the data further right.
     ///
     /// Narrower than the table: the stored widths are returned untouched, so the operator keeps the
     /// layout they dragged and the table scrolls horizontally rather than squeezing columns they
@@ -344,10 +353,10 @@ struct ColumnWidths: Equatable, Sendable {
         return stretched
     }
 
-    /// The fixed chrome: disclosure chevron, the per-row action buttons and the row insets. Counted
-    /// once, and never stretched by `filling(_:)`.
+    /// The fixed chrome: the row checkboxes, the disclosure chevron, the per-row action buttons and
+    /// the row insets. Counted once, and never stretched by `filling(_:)`.
     static var chromeWidth: CGFloat {
-        LotColumn.expander + LotColumn.scan + LotColumn.rowInsets
+        LotColumn.selection + LotColumn.expander + LotColumn.scan + LotColumn.rowInsets
     }
 
     /// The draggable columns being drawn, added up — the part of the table that absorbs a wider
@@ -364,6 +373,6 @@ struct ColumnWidths: Equatable, Sendable {
     /// the pallet it belongs to however the columns are sized — and shrinks with them when one of
     /// the two is hidden.
     var identityWidth: CGFloat {
-        LotColumn.expander + LotColumn.scan + width(.lotNumber) + width(.title)
+        LotColumn.selection + LotColumn.expander + LotColumn.scan + width(.lotNumber) + width(.title)
     }
 }

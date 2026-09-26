@@ -81,6 +81,48 @@ final class StubScript: @unchecked Sendable {
     }
 }
 
+/// The reports one scan sent, in the order they arrived — the same stream the app's readout is fed by
+/// the coordinator, which is the only way the bar's claim can be measured against a scan that really ran.
+final class ReportLog: @unchecked Sendable {
+
+    private let lock = NSLock()
+    private var entries: [PhotoScanReport] = []
+
+    func note(_ report: PhotoScanReport) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.append(report)
+    }
+
+    /// Every event the reporter was handed, in the order it arrived.
+    var events: [PhotoScanEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.map(\.event)
+    }
+
+    /// The answered count each frame report carried, in the order the scan reported them: one entry for a
+    /// frame's announcement and one for its outcome, and nothing for the reconciliation's own steps.
+    var answeredCounts: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.compactMap { report in
+            switch report.event {
+            case .reading(_, _, let answered, _),
+                 .read(_, _, let answered, _),
+                 .failed(_, _, let answered, _),
+                 .manifesting(_, _, _, let answered, _),
+                 .manifested(_, _, _, let answered, _),
+                 .manifestFailed(_, _, let answered, _, _):
+                return answered
+            case .folded, .grouped, .aggregating, .aggregated, .aggregatedLocally, .fallingBack,
+                 .fallingBackFromManifest, .manifestSettled, .pricing, .priced:
+                return nil
+            }
+        }
+    }
+}
+
 final class StubProtocol: URLProtocol {
     nonisolated(unsafe) static var script: StubScript?
 
@@ -141,6 +183,16 @@ let imageSubject = ValuationSubject(
 
 /// Stand-in for a downloaded photo: the loader only sniffs the declared content type.
 let jpegBytes = Data(repeating: 0xFF, count: 512)
+
+/// One frame's bytes, for a gallery whose frames are meant to be *different* photographs.
+///
+/// `jpegBytes` is one blob, so three downloads served with it are three copies of one file — and the
+/// batched route groups a gallery before it sends it (`PhotoFrameGrouping`), so a script that answered
+/// three times with the same bytes would be answering about one photograph as if it were three. The
+/// bytes here are not a picture at all, so no fingerprint is computed for them and they stay distinct.
+func frameBytes(_ index: Int) -> Data {
+    Data(repeating: UInt8(0xF0 &+ index), count: 512)
+}
 
 /// A photograph that really *is* an image — a small blank PNG, encoded here with CoreGraphics rather
 /// than pasted in as a base64 blob so it cannot rot.
@@ -263,9 +315,97 @@ let deepSeekSubject = ValuationSubject(
     detailURL: nil
 )
 
+/// A three-photograph lot, so the batched route has to split one gallery across requests and fold what
+/// comes back.
+let threePhotoSubject = ValuationSubject(
+    lotNumber: "310",
+    title: "Pallet of candles and batteries",
+    rawDescription: "Mixed lot, 40 pieces.",
+    currentBid: 120,
+    imageURLs: [
+        URL(string: "https://cdn.example.test/lot-310-1.jpg")!,
+        URL(string: "https://cdn.example.test/lot-310-2.jpg")!,
+        URL(string: "https://cdn.example.test/lot-310-3.jpg")!
+    ],
+    detailURL: nil
+)
+
 /// A photograph step, as the loader will accept it.
 func photoStep() -> StubScript.Step {
     StubScript.Step(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"])
+}
+
+/// A photograph with a picture *on* it, encoded here with CoreGraphics rather than pasted in as a
+/// base64 blob so it cannot rot.
+///
+/// The grouping pass (`PhotoFrameGrouping`) compares frames by their pixels, so a fixture for it has
+/// to hold more than a flat colour: a blank sheet reduces to one gray level and is deliberately given
+/// no fingerprint at all. `seed` picks which picture — the same seed is the same photograph, byte for
+/// byte, and a different seed is a different one, which is what lets a gallery repeat one frame and
+/// hold another.
+func detailedPNGBytes(seed: Int, side: Int = 96) -> Data {
+    guard let context = CGContext(
+        data: nil,
+        width: side,
+        height: side,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return Data() }
+
+    // A soft gradient up the frame, so the fingerprint has plenty of distinct gray levels to work
+    // with — a frame below `PhotoFrameGrouping.minimumDetail` is never compared at all…
+    let bands = 32
+    for band in 0..<bands {
+        let level = Double(band) / Double(bands - 1) * 0.6
+        context.setFillColor(CGColor(red: level, green: level, blue: level, alpha: 1))
+        context.fill(
+            CGRect(
+                x: 0,
+                y: Double(band) * Double(side) / Double(bands),
+                width: Double(side),
+                height: Double(side) / Double(bands)
+            )
+        )
+    }
+
+    // …and one white square whose corner the seed decides, which is the only thing that tells two
+    // seeds apart. Moved, not redrawn: the two pictures hold the same gray levels in a different
+    // order, so their fingerprints differ exactly in the square's own cells.
+    let quarter = side / 4
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(
+        CGRect(
+            x: Double(seed % 4) * Double(quarter),
+            y: Double((seed / 4) % 4) * Double(quarter),
+            width: Double(quarter),
+            height: Double(quarter)
+        )
+    )
+
+    guard let image = context.makeImage() else { return Data() }
+
+    let data = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(
+        data,
+        UTType.png.identifier as CFString,
+        1,
+        nil
+    ) else { return Data() }
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else { return Data() }
+    return data as Data
+}
+
+/// One downloaded photograph, as a scan is handed it.
+func lotImage(_ bytes: Data, at address: String) -> LotImage {
+    LotImage(
+        mimeType: "image/png",
+        base64: bytes.base64EncodedString(),
+        byteCount: bytes.count,
+        sourceURL: URL(string: address)!
+    )
 }
 
 func makeService(
@@ -275,7 +415,8 @@ func makeService(
     maxImageBytes: Int = 6_000_000,
     maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
     photoScan: PhotoScanPlan = .disabled,
-    store: PhotoReadingStore = .shared
+    store: PhotoReadingStore = .shared,
+    report: @escaping @Sendable (PhotoScanReport) -> Void = { _ in }
 ) -> GeminiValuationService {
     StubProtocol.script = script
     let configuration = URLSessionConfiguration.ephemeral
@@ -289,7 +430,8 @@ func makeService(
         requestsPerMinute: requestsPerMinute,
         maxAttempts: maxAttempts,
         photoScan: photoScan,
-        store: store
+        store: store,
+        report: report
     )
 }
 
@@ -304,6 +446,35 @@ let deepSeekSuccessBody: Data = {
 /// JSON mode "may occasionally return empty content" — the documented failure this app retries.
 let deepSeekEmptyBody = Data(#"{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":""}}]}"#.utf8)
 
+/// A `/chat/completions` success envelope around arbitrary JSON, which is what both the manifest route
+/// and the two pricing routes are handed back.
+func chatEnvelope(_ json: String) -> Data {
+    let escaped = json.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+    return Data(#"{"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"\#(escaped)"}}]}"#.utf8)
+}
+
+/// One manifest line as a batch's answer writes it.
+struct StubManifestLine {
+    var name: String
+    var brand: String = ""
+    var model: String = ""
+    var quantity: Int = 1
+    var views: [Int] = []
+    var confidence: String = "High"
+    var identifiers: [String] = []
+}
+
+/// A batch's manifest answer, in the schema the batch prompt asks for.
+func manifestBody(_ lines: [StubManifestLine]) -> Data {
+    let rendered = lines.map { line -> String in
+        let codes = line.identifiers.map { "\"\($0)\"" }.joined(separator: ",")
+        let places = line.views.map(String.init).joined(separator: ",")
+        return #"{"itemName":"\#(line.name)","brand":"\#(line.brand)","modelNumber":"\#(line.model)","quantity":\#(line.quantity),"confidence":"\#(line.confidence)","identifiers":[\#(codes)],"views":[\#(places)]}"#
+    }
+    return chatEnvelope(#"{"manifest":[\#(rendered.joined(separator: ","))]}"#)
+}
+
 /// DeepSeek's 429 envelope: a concurrency ceiling, not a per-minute quota.
 let deepSeekRateLimitBody = Data(#"{"error":{"message":"Rate limit reached for requests","type":"rate_limit_error","code":"rate_limit_exceeded"}}"#.utf8)
 
@@ -314,7 +485,9 @@ func makeDeepSeekService(
     maxImageBytes: Int = 6_000_000,
     maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
     photoScan: PhotoScanPlan = .disabled,
-    store: PhotoReadingStore = .shared
+    photosPerRequest: Int = 0,
+    store: PhotoReadingStore = .shared,
+    report: @escaping @Sendable (PhotoScanReport) -> Void = { _ in }
 ) -> DeepSeekValuationService {
     StubProtocol.script = script
     let configuration = URLSessionConfiguration.ephemeral
@@ -328,7 +501,9 @@ func makeDeepSeekService(
         requestsPerMinute: requestsPerMinute,
         maxAttempts: maxAttempts,
         photoScan: photoScan,
-        store: store
+        photosPerRequest: photosPerRequest,
+        store: store,
+        report: report
     )
 }
 
@@ -356,10 +531,49 @@ func imageURLs(in request: SeenRequest?) -> [String] {
     }
 }
 
+/// The gallery number a batch says it holds, read off its own prompt: `photograph 3 of 5 is attached` → `3`.
+///
+/// Read rather than assumed, because the stub hands image bodies out in the order the downloads arrive,
+/// so which frame of a gallery gets which picture is not a fact about the app. What *is* a fact is that
+/// the batch names the gallery number of the frame it carries, and that is what this reads.
+///
+/// - Parameter count: the gallery size the batch should be speaking in, so an earlier mention of a
+///   photograph in the same prompt cannot be mistaken for the batch's own numbering.
+/// - Returns: `nil` for a batch that carries more than one frame, or that says nothing.
+func photographNumber(in prompt: String, of count: Int) -> Int? {
+    guard let marker = prompt.range(of: " of \(count) is attached") else { return nil }
+    let digits = prompt[..<marker.lowerBound].reversed().prefix { $0.isNumber }.reversed()
+    guard !digits.isEmpty else { return nil }
+    return Int(String(digits))
+}
+
 /// A chat request's system instruction.
 func systemText(in request: SeenRequest?) -> String {
     let messages = request?.json["messages"] as? [[String: Any]] ?? []
     return messages.first?["content"] as? String ?? ""
+}
+
+/// The parts of a `generateContent` request's last content block, as the stub saw them.
+///
+/// Gemini does not send the chat shape the three readers above speak: the parts live under
+/// `contents`, and a photograph is `inline_data` — a MIME type and raw base64 — rather than an
+/// `image_url` carrying a data URL. Reading one with the chat helpers would find no photograph in it
+/// at all, so a check about attached frames has to ask in Gemini's own terms.
+func geminiParts(in request: SeenRequest?) -> [[String: Any]] {
+    let contents = request?.json["contents"] as? [[String: Any]] ?? []
+    return contents.last?["parts"] as? [[String: Any]] ?? []
+}
+
+/// The concatenated text parts of a `generateContent` request.
+func geminiText(in request: SeenRequest?) -> String {
+    geminiParts(in: request).compactMap { $0["text"] as? String }.joined()
+}
+
+/// The base64 of every photograph a `generateContent` request inlines, in part order.
+func geminiImages(in request: SeenRequest?) -> [String] {
+    geminiParts(in: request).compactMap { part in
+        (part["inline_data"] as? [String: Any])?["data"] as? String
+    }
 }
 
 
@@ -1177,10 +1391,10 @@ do {
     check(LotColumnKey.allCases.filter { $0.sortField == nil }.count == 5, "the five read-only columns offer no sort", detail: LotColumnKey.allCases.filter { $0.sortField == nil }.map(\.label).joined(separator: ", "))
     check(LotColumnKey.allCases.allSatisfy { $0.defaultWidth >= ColumnWidths.minimumWidth }, "every shipped width clears the minimum")
 
-    let shippedTotal = LotColumn.expander + LotColumn.scan
+    let shippedTotal = LotColumn.selection + LotColumn.expander + LotColumn.scan
         + LotColumnKey.allCases.reduce(0) { $0 + $1.defaultWidth } + LotColumn.rowInsets
     check(standard.totalWidth == shippedTotal, "the total is every column plus the fixed chrome", detail: "\(standard.totalWidth) vs \(shippedTotal)")
-    check(standard.identityWidth == LotColumn.expander + LotColumn.scan + standard.lotNumber + standard.title,
+    check(standard.identityWidth == LotColumn.selection + LotColumn.expander + LotColumn.scan + standard.lotNumber + standard.title,
           "the nested name cell spans the identity columns", detail: "\(standard.identityWidth)")
     check(standard.width(.status) == LotColumnKey.status.defaultWidth, "a column's width comes from its key")
     check(LotColumn.scan >= 240, "the fixed actions column is wide enough for Eval, Price and Open side by side", detail: "\(LotColumn.scan)")
@@ -1201,7 +1415,7 @@ do {
     check(ColumnWidths(status: 10_000).status == ColumnWidths.maximumWidth, "at both ends")
 
     var narrowed = ColumnWidths.standard
-    let chrome = LotColumn.expander + LotColumn.scan + LotColumn.rowInsets
+    let chrome = LotColumn.selection + LotColumn.expander + LotColumn.scan + LotColumn.rowInsets
     for key in LotColumnKey.allCases {
         narrowed.setWidth(-1, for: key)
         check(narrowed.width(key) == ColumnWidths.minimumWidth, "\(key.label) drags down to the minimum and no further", detail: "\(narrowed.width(key))")
@@ -1216,8 +1430,8 @@ do {
 
     let standard = ColumnWidths.standard
     let chrome = ColumnWidths.chromeWidth
-    check(chrome == LotColumn.expander + LotColumn.scan + LotColumn.rowInsets,
-          "the chrome is the chevron, the action pair and the row insets", detail: "\(chrome)")
+    check(chrome == LotColumn.selection + LotColumn.expander + LotColumn.scan + LotColumn.rowInsets,
+          "the chrome is the row checkboxes, the chevron, the action pair and the row insets", detail: "\(chrome)")
     check(standard.dataWidth == LotColumnKey.allCases.reduce(0) { $0 + $1.defaultWidth },
           "the data width is the thirteen draggable columns", detail: "\(standard.dataWidth)")
     check(standard.totalWidth == chrome + standard.dataWidth, "and the total is both of them", detail: "\(standard.totalWidth)")
@@ -1227,8 +1441,8 @@ do {
     check(standard.filling(900) == standard, "a window narrower than the table leaves the widths alone")
     check(standard.filling(standard.totalWidth) == standard, "and so does a window that is exactly the table's width")
 
-    let wide = standard.filling(1_560)
-    check(abs(wide.totalWidth - 1_560) < 0.01, "a wider window is filled exactly", detail: "\(wide.totalWidth)")
+    let wide = standard.filling(1_680)
+    check(abs(wide.totalWidth - 1_680) < 0.01, "a wider window is filled exactly", detail: "\(wide.totalWidth)")
 
     let factor = wide.dataWidth / standard.dataWidth
     check(factor > 1, "because the data columns grew", detail: String(format: "%.3f", factor))
@@ -1495,7 +1709,7 @@ do {
     // lines stay under the pallet whether or not the description column is there.
     var noTitle = shipped
     noTitle.visibility = ColumnVisibility(hiddenColumns: [.title])
-    check(noTitle.identityWidth == LotColumn.expander + LotColumn.scan + shipped.lotNumber,
+    check(noTitle.identityWidth == LotColumn.selection + LotColumn.expander + LotColumn.scan + shipped.lotNumber,
           "hiding the Description column pulls the nested name cell in with it", detail: "\(noTitle.identityWidth)")
 
     // Stretch to fit: the freed width is shared by the columns that are left, exactly as the slack
@@ -2103,6 +2317,187 @@ do {
     }
 }
 
+// MARK: - 34b. A repeated frame is one reading, and the frame still travels
+
+/// The saving a grouping is for, and the rule it must not break.
+///
+/// A gallery repeats frames more often than it looks: a lot re-listed keeps the same zoom image, a
+/// thumbnail strip carries the main frame again, and a carton photographed twice with its label
+/// turned to the camera is one carton. A scan that reads every frame pays for each of those twice
+/// over — once for the reading, and again for the reconciliation that has to work out that the
+/// readings were of one thing.
+///
+/// So frames that are *provably* the same — identical pixels, or the same decoded barcode set — are
+/// read once (`PhotoFrameGrouping`). What is pinned here is both halves of that: the request that is
+/// not spent, and the photograph that is still delivered. A fold that quietly dropped the frame would
+/// make the line items wrong with nothing failing, which is the one outcome this pipeline must never
+/// produce (`LotPhotoScan`, rule 1).
+///
+/// The two signals are checked apart because they promise different things, and the difference is the
+/// whole reason the barcode signal is narrow: the same pixels mean *the other frame's reading covers
+/// this frame in full*, while the same barcode means it covers that one product and nothing else the
+/// frame may hold.
+do {
+    print("34b. A repeated frame is read once, and the frame itself still travels")
+
+    let picture = detailedPNGBytes(seed: 1)
+    let otherPicture = detailedPNGBytes(seed: 9)
+    check(!picture.isEmpty && !otherPicture.isEmpty,
+          "the test frames encoded, so what follows is about grouping rather than about CoreGraphics",
+          detail: "\(picture.count) / \(otherPicture.count) bytes")
+
+    let gallery = [
+        lotImage(picture, at: "https://cdn.example.test/lot-310-1.jpg"),
+        lotImage(picture, at: "https://cdn.example.test/lot-310-2.jpg"),
+        lotImage(otherPicture, at: "https://cdn.example.test/lot-310-3.jpg")
+    ]
+
+    // The same photograph twice, and a photograph of something else, as the scan is handed them.
+    let samePicture = await PhotoFrameGrouping.group(images: gallery, labels: [], limit: gallery.count)
+    check(samePicture.views.count == 1,
+          "two frames with identical pixels are one view",
+          detail: "\(samePicture.views.count) view(s) from \(gallery.count) frames")
+    check(samePicture.views.first?.representative == 1,
+          "and the view is the earliest frame that carried them",
+          detail: "\(String(describing: samePicture.views.first?.representative))")
+    check(samePicture.views.first?.folds.map(\.frame) == [2],
+          "with the later frame folded into it",
+          detail: "\(String(describing: samePicture.views.first?.folds.map(\.frame)))")
+    check(samePicture.representative(of: 2) == 1, "so the scan is told exactly which frame it may skip")
+    check(samePicture.representative(of: 1) == nil && samePicture.representative(of: 3) == nil,
+          "while the frame that was read, and the frame showing something else, keep their own readings")
+    check(samePicture.views.first?.phrase.contains("same picture") == true,
+          "and the claim says what the two frames have in common",
+          detail: samePicture.views.first?.phrase ?? "nil")
+
+    // The ceiling bounds what is compared at all: a frame the scan was never going to read is not
+    // folded, because that would save nothing and claiming it would be untrue.
+    let clipped = await PhotoFrameGrouping.group(images: gallery, labels: [], limit: 2)
+    check(clipped.views.first?.folds.map(\.frame) == [2] && clipped.representative(of: 3) == nil,
+          "a frame past the read ceiling is left out of the comparison entirely")
+    let single = await PhotoFrameGrouping.group(images: gallery, labels: [], limit: 1)
+    check(single.isEmpty, "and a scan reading one frame has nothing to group")
+
+    // The weaker signal, over frames the fingerprint cannot speak for: two blank sheets have no
+    // picture to compare, so what is left is the barcode the app decoded off each of them.
+    let flats = (1...3).map { lotImage(blankPNGBytes, at: "https://cdn.example.test/lot-311-\($0).jpg") }
+    let codes = [
+        LotImageEvidence(barcodes: ["0123456789012"], imagesRead: 1),
+        LotImageEvidence(barcodes: ["0123456789012"], imagesRead: 1),
+        LotImageEvidence(barcodes: ["0123456789012", "0037000123456"], imagesRead: 1)
+    ]
+    let sameBarcode = await PhotoFrameGrouping.group(images: flats, labels: codes, limit: flats.count)
+    check(sameBarcode.views.first?.folds.map(\.frame) == [2],
+          "two frames carrying the same decoded barcode are one view",
+          detail: "\(String(describing: sameBarcode.views.first?.folds.map(\.frame)))")
+    check(sameBarcode.representative(of: 3) == nil,
+          "but a frame carrying that barcode *and* another one holds something the first does not, "
+              + "so it keeps its own reading")
+    let unlabelled = await PhotoFrameGrouping.group(images: flats, labels: [], limit: flats.count)
+    check(unlabelled.isEmpty,
+          "and two flat frames with nothing decoded off them are never claimed to be the same photograph")
+}
+
+// MARK: - 34c. A whole scan with a repeated frame spends one reading and drops no photograph
+
+/// The same saving, driven through the pipeline rather than through the grouping alone.
+///
+/// Two frames that are the same photograph go up; one reading comes back; the reconciliation is handed
+/// the frame that was not read, with a note saying a reading above already covers it. Three things
+/// have to hold at once, and each is checked below: the request that was not spent, the photograph
+/// that still travelled, and the row the operator reads afterwards.
+do {
+    print("34c. A scan with a repeated frame spends one reading and attaches the frame anyway")
+
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("lotlogic-grouping-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = PhotoReadingStore(directory: directory)
+
+    /// One pallet, photographed twice from the same spot.
+    let subject = ValuationSubject(
+        lotNumber: "310",
+        title: "Pallet of batteries",
+        rawDescription: "Mixed lot, 20 pieces.",
+        currentBid: 90,
+        imageURLs: [
+            URL(string: "https://cdn.example.test/lot-310-1.jpg")!,
+            URL(string: "https://cdn.example.test/lot-310-2.jpg")!
+        ],
+        detailURL: nil
+    )
+
+    // Two downloads of the same photograph, one reading, one reconciliation — four steps, not five.
+    let repeated = detailedPNGBytes(seed: 11)
+    let script = StubScript([
+        .init(status: 200, body: repeated, headers: ["Content-Type": "image/png"]),
+        .init(status: 200, body: repeated, headers: ["Content-Type": "image/png"]),
+        .init(status: 200, body: photoReadingBody(name: "Energizer MAX AA batteries", quantity: 6)),
+        .init(status: 200, body: successBody)
+    ])
+    let service = makeService(
+        script,
+        requestsPerMinute: 0,
+        maxAttempts: 1,
+        photoScan: PhotoScanPlan.thorough(modelID: "gemini-2.5-flash", concurrency: 1),
+        store: store
+    )
+
+    do {
+        let outcome = try await service.value(subject: subject)
+
+        check(outcome.readings.count == 1,
+              "one reading covered both frames of the gallery",
+              detail: "\(outcome.readings.count)")
+        check(outcome.readings.first?.imageURL == subject.imageURLs[0],
+              "and it names the frame it was actually read from",
+              detail: outcome.readings.first?.imageURL.lastPathComponent ?? "nil")
+        check(outcome.scanRequests == 2,
+              "so the scan cost two requests — the reading and the reconciliation — rather than three",
+              detail: "\(outcome.scanRequests)")
+        check(outcome.groupedViews.first?.folds.map(\.frame) == [2],
+              "and the outcome says which frame stood in for which",
+              detail: "\(String(describing: outcome.groupedViews.first?.folds.map(\.frame)))")
+
+        let chats = script.requests.filter { $0.url.absoluteString.contains("generateContent") }
+        check(chats.count == 2, "one reading request and one reconciliation", detail: "\(chats.count)")
+        check(geminiImages(in: chats.first).count == 1, "the reading carried the frame it read")
+        check(geminiImages(in: chats.last) == [repeated.base64EncodedString()],
+              "and the folded frame travelled with it — its own pixels, and no other photograph",
+              detail: "\(geminiImages(in: chats.last).count) attached")
+        check(geminiText(in: chats.last).contains("showed what another photograph showed"),
+              "with the reconciliation told that a reading already covers it, before it counts anything",
+              detail: String(geminiText(in: chats.last).suffix(120)))
+
+        // And what the row shows for it: the frames that were read once, and nothing missing that the
+        // single-pass appraisal would have seen.
+        let row = LotItem(
+            lotNumber: "310",
+            currentBid: 90,
+            rawDescription: "Mixed lot, 20 pieces.",
+            imageUrls: [],
+            title: "Pallet of batteries"
+        )
+        row.applyValuation(
+            outcome.items,
+            imagesAnalyzed: outcome.imagesSent,
+            passes: outcome.passes,
+            readings: outcome.readings,
+            groupedViews: outcome.groupedViews
+        )
+        check(row.hasGroupedViews, "the row knows a frame was read once")
+        check(row.groupedFrameCount == 1,
+              "counts the request that was not spent",
+              detail: "\(row.groupedFrameCount)")
+        check(row.groupedViewsPhrase.contains("same picture"),
+              "and its help line names the frame and the reason",
+              detail: row.groupedViewsPhrase)
+    } catch {
+        tally.bump()
+        print("  FAIL  unexpected error: \(error)")
+    }
+}
+
 // MARK: - 35. The valuation reaches the row on the main actor
 
 /// The crash this guards against: a scan's task body is written inside a `@MainActor` class, but a
@@ -2175,9 +2570,9 @@ do {
 /// which is why the two rules are pinned here.
 ///
 /// The readout's *wording* is pinned with them, and its step and money types: the pill names a row
-/// (`Evaluating Lot #19002`) or counts a batch (`Pricing Lot #3 of 12`), the step line and the bar are
-/// driven one photograph at a time, and the bottom line speaks for the row in hand. All of it is values
-/// in `RunProgress.swift`, which is the only reason any of it can be checked without a browser.
+/// (`Evaluating Lot #19002`) or counts a batch (`Pricing Lot #3 of 12`), the step line and the bar move by
+/// the *count* of photographs answered, and the bottom line speaks for the row in hand. All of it is
+/// values in `RunProgress.swift`, which is the only reason any of it can be checked without a browser.
 do {
     print("36. The progress readout counts the work that was asked for, and watches it step by step")
 
@@ -2285,28 +2680,93 @@ do {
     // The readout's step: what the modal prints while a row is mid-appraisal, and the share of that row
     // the bar counts. One update per photograph is the whole point — a scan is a dozen requests, and a bar
     // that only moved when a row landed said "nothing is happening" for minutes at a time.
+    //
+    // What those updates *count* is the other half of the fix. A nine-frame scan read as `1 of 9`, `7 of 9`,
+    // `3 of 9` because the step named the frame in flight, and the reads run three at a time
+    // (`PhotoScanPlan.defaultConcurrency`), so the numbers came back in the order the provider answered
+    // them. The step is the count of frames with an answer instead — which cannot go backwards — and the
+    // frame number stays on the console line (`PhotoScanEvent.message`), where it is a fact rather than an
+    // order.
     check(AppraisalStep.readingPage.phrase == "reading the lot's own page",
           "a row's first step is its own page", detail: AppraisalStep.readingPage.phrase)
-    check(AppraisalStep.photograph(index: 5, of: 12).phrase == "photograph 5 of 12",
-          "a scan names the photograph it is on", detail: AppraisalStep.photograph(index: 5, of: 12).phrase)
+    check(AppraisalStep.photograph(answered: 5, of: 12).phrase == "5 of 12 photograph(s) answered",
+          "a scan counts the photographs it has answered",
+          detail: AppraisalStep.photograph(answered: 5, of: 12).phrase)
     check(AppraisalStep.reconciling(readings: 12).phrase == "reconciling 12 reading(s) into the line items",
           "and the reconciliation that closes it out",
           detail: AppraisalStep.reconciling(readings: 12).phrase)
     let ladder = [
         AppraisalStep.readingPage.share,
         AppraisalStep.evaluatingText.share,
-        AppraisalStep.photograph(index: 1, of: 12).share,
-        AppraisalStep.photograph(index: 12, of: 12).share,
+        AppraisalStep.photograph(answered: 1, of: 12).share,
+        AppraisalStep.photograph(answered: 12, of: 12).share,
         AppraisalStep.reconciling(readings: 12).share
     ]
     check(zip(ladder, ladder.dropFirst()).allSatisfy { $0 < $1 }, "the steps fill the bar in order",
           detail: ladder.map { String(format: "%.2f", $0) }.joined(separator: " < "))
     check(ladder.allSatisfy { $0 > 0 && $0 < 1 }, "and none of them is a whole row: only an answer is",
           detail: ladder.map { String(format: "%.2f", $0) }.joined(separator: ", "))
-    check(AppraisalStep.photograph(index: 40, of: 3).share < 1,
-          "a photograph past its own gallery still cannot claim the row")
-    check(AppraisalStep(PhotoScanEvent.read(index: 3, of: 12, objects: 2)) == .photograph(index: 3, of: 12),
-          "a scan's own report maps onto the readout's step")
+    check(AppraisalStep.photograph(answered: 40, of: 3).share < 1,
+          "counting more frames than the gallery holds cannot claim the row either")
+    // Each answered photograph is the same slice of the row, which is the "add n percent per photograph"
+    // the bar is supposed to do: nine answers are nine even steps from the base to the reconciliation.
+    let nineFrames = (1...9).map { AppraisalStep.photograph(answered: $0, of: 9).share }
+    let slice = 0.7 / 9
+    check(zip(nineFrames, nineFrames.dropFirst()).allSatisfy { abs($1 - $0 - slice) < 1e-9 },
+          "each answered photograph adds the same slice of the row",
+          detail: nineFrames.map { String(format: "%.3f", $0) }.joined(separator: " "))
+
+    // The reported bug, as the reports a nine-frame scan actually sends with three reads in flight: frames
+    // land as the provider answers them, so the frame numbers run 1, 2, 3, 2, 4, 5, 1, 3, 6, 8, 4, 9, 7 —
+    // the old step said `photograph 7 of 9` and then `photograph 3 of 9`. Counted answers cannot do that.
+    let scan: [PhotoScanEvent] = [
+        .reading(index: 1, of: 9, answered: 0, reused: false),
+        .reading(index: 2, of: 9, answered: 0, reused: false),
+        .reading(index: 3, of: 9, answered: 0, reused: false),
+        .read(index: 2, of: 9, answered: 1, objects: 3),
+        .reading(index: 4, of: 9, answered: 1, reused: false),
+        .read(index: 5, of: 9, answered: 2, objects: 2),
+        .read(index: 1, of: 9, answered: 3, objects: 4),
+        .read(index: 3, of: 9, answered: 4, objects: 1),
+        .failed(index: 6, of: 9, answered: 5, reason: "no answer"),
+        .read(index: 8, of: 9, answered: 6, objects: 2),
+        .read(index: 4, of: 9, answered: 7, objects: 3),
+        .read(index: 9, of: 9, answered: 8, objects: 5),
+        .read(index: 7, of: 9, answered: 9, objects: 1),
+        .aggregating(photographs: 8, leftovers: 1)
+    ]
+    let steps = scan.compactMap { AppraisalStep($0) }
+    let shares = steps.map(\.share)
+    check(zip(shares, shares.dropFirst()).allSatisfy { $0 <= $1 },
+          "a scan whose frames land out of order still fills the bar forwards",
+          detail: shares.map { String(format: "%.2f", $0) }.joined(separator: " "))
+    let counted = steps.compactMap { step -> Int? in
+        guard case .photograph(let answered, _) = step else { return nil }
+        return answered
+    }
+    check(counted == [0, 0, 0, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+          "and its count grows by the answers behind it, one frame at a time",
+          detail: counted.map(String.init).joined(separator: " "))
+    check(
+        AppraisalStep(PhotoScanEvent.read(index: 3, of: 12, answered: 4, objects: 2))
+            == .photograph(answered: 4, of: 12),
+        "a scan's own report maps onto the readout's step"
+    )
+    check(
+        AppraisalStep(PhotoScanEvent.reading(index: 9, of: 12, answered: 4, reused: false))
+            == AppraisalStep(PhotoScanEvent.read(index: 2, of: 12, answered: 4, objects: 1)),
+        "frame 9 starting where frame 2 landed is the same step: the frame is not the bar's business"
+    )
+    check(
+        AppraisalStep(PhotoScanEvent.failed(index: 7, of: 12, answered: 4, reason: "no answer"))
+            == .photograph(answered: 4, of: 12),
+        "and a frame that could not be read is an answer too"
+    )
+    check(
+        AppraisalStep(PhotoScanEvent.reading(index: 1, of: 12, answered: 1, reused: true))
+            == .photograph(answered: 1, of: 12),
+        "as is one restored from this machine's store"
+    )
     check(AppraisalStep(PhotoScanEvent.aggregating(photographs: 12, leftovers: 0)) == .reconciling(readings: 12),
           "and so does its reconciliation")
     check(AppraisalStep(PhotoScanEvent.aggregated(items: 4)) == nil,
@@ -2314,10 +2774,644 @@ do {
     check(AppraisalStep(PhotoScanEvent.fallingBack(reason: "no readings")) == .wholeGallery,
           "the single-pass fallback is a step too")
 
+    // The same claim measured against a scan that really runs, rather than against a list of events typed
+    // out by hand: three photographs read three at a time report `reading` before any of them lands, then
+    // answers one at a time, and never a number smaller than the one before. This is the half of the fix
+    // that lives in the pipeline (`LotPhotoScan`), and it is the reason the step can promise a count.
+    do {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("lotlogic-readout-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let subject = ValuationSubject(
+            lotNumber: "311",
+            title: "Pallet of batteries",
+            rawDescription: "Mixed lot, 20 pieces.",
+            currentBid: 90,
+            imageURLs: (1...3).map { URL(string: "https://cdn.example.test/lot-311-\($0).jpg")! },
+            detailURL: nil
+        )
+        let script = StubScript([
+            photoStep(),
+            photoStep(),
+            photoStep(),
+            .init(status: 200, body: photoReadingBody(name: "Energizer MAX AA batteries", quantity: 2)),
+            .init(status: 200, body: photoReadingBody(name: "Duracell AA batteries", quantity: 3)),
+            .init(status: 200, body: photoReadingBody(name: "Panasonic AA batteries", quantity: 4)),
+            .init(status: 200, body: successBody)
+        ])
+        let log = ReportLog()
+        let service = makeService(
+            script,
+            requestsPerMinute: 0,
+            maxAttempts: 1,
+            photoScan: PhotoScanPlan.thorough(modelID: "gemini-2.5-flash", concurrency: 3),
+            store: PhotoReadingStore(directory: directory),
+            report: { log.note($0) }
+        )
+        do {
+            let outcome = try await service.value(subject: subject)
+            let counts = log.answeredCounts
+            check(outcome.readings.count == 3,
+                  "a three-frame gallery read three at a time is three readings",
+                  detail: "\(outcome.readings.count)")
+            check(counts.count == 6,
+                  "and six frame reports: one announcement and one answer for each of them",
+                  detail: counts.map(String.init).joined(separator: " "))
+            check(zip(counts, counts.dropFirst()).allSatisfy { $0 <= $1 },
+                  "the counts a real scan reports never go backwards",
+                  detail: counts.map(String.init).joined(separator: " "))
+            check(counts.first == 0 && counts.last == 3,
+                  "running from nothing to the gallery's own size",
+                  detail: counts.map(String.init).joined(separator: " "))
+            check(counts.prefix(3) == [0, 0, 0],
+                  "with the three frames announced before any of them had landed",
+                  detail: counts.map(String.init).joined(separator: " "))
+        } catch {
+            tally.bump()
+            print("  FAIL  unexpected error: \(error)")
+        }
+    }
+
     // The modal's bottom line speaks for the row in hand: `Retail` there is that row's own figure, and the
     // difference between what it resells for and what is bid on it is the one number the line derives.
     check(LotMoney(currentBid: 75, retail: 420, resale: 310, provisional: true).profit == 235,
           "the money line's profit is the row's own resale over its current bid")
+}
+
+// MARK: - 37. The checked rows
+
+do {
+    print("37. The checked rows: what the box over the table shows, and which way its click goes")
+
+    let a = UUID(), b = UUID(), c = UUID()
+    let drawn = [a, b, c]
+
+    // Nothing checked is not "all checked", and the empty table is the case that matters: a filled box
+    // over no rows would be a promise there is nothing behind.
+    var checked = LotSelection()
+    check(checked.isEmpty && checked.count == 0, "a fresh table has nothing checked")
+    check(checked.scope(of: drawn) == .none, "which reads as an empty box over the rows")
+    check(checked.scope(of: []).selectsOnClick, "and a click on an empty box would fill, not clear")
+
+    // One hand-picked row: the box reads mixed, and a click there *adds* rather than clears. That
+    // direction is the whole point of `.some` — a click must never throw away the picked rows.
+    checked.toggle(b)
+    check(checked.contains(b) && checked.count == 1, "a row's own checkbox checks that row and no other")
+    check(checked.scope(of: drawn) == .some, "one of three reads as a mixed box", detail: "\(checked.scope(of: drawn))")
+    check(checked.scope(of: drawn).selectsOnClick, "and the mixed box fills the table rather than emptying it")
+    checked.toggle(b)
+    check(checked.isEmpty, "clicking the same row again is what unchecks it")
+
+    // The header's box, both directions, off the same click.
+    checked.toggle(b)
+    checked.toggleAll(drawn)
+    check(checked.scope(of: drawn) == .all, "the box's click checks every row it speaks for")
+    check(checked.count == 3, "and nothing else", detail: "\(checked.count)")
+    check(!checked.scope(of: drawn).selectsOnClick, "a full box is the one state whose click empties")
+    checked.toggleAll(drawn)
+    check(checked.isEmpty, "which is what it does")
+
+    // The box speaks for the rows *drawn*, not the board: with a search standing, a click may not
+    // reach past what is on screen, and it may not disturb what it cannot see either.
+    checked.selectAll([b])
+    checked.toggleAll([a])
+    check(checked.contains(a) && checked.contains(b) && !checked.contains(c),
+          "a click during a search checks the rows shown and leaves the rest alone",
+          detail: "\(checked.count) checked")
+    check(checked.scope(of: [a]) == .all && checked.scope(of: drawn) == .some,
+          "so the same set can be 'all' of what is drawn and 'some' of what is not")
+
+    // The menu's two items, which name a direction instead of guessing one.
+    checked.selectAll(drawn)
+    check(checked.scope(of: drawn) == .all, "Select all checks the rows it is given, whatever they were")
+    checked.selectAll(drawn)
+    check(checked.count == 3, "and repeating it changes nothing")
+    checked.deselectAll([b])
+    check(!checked.contains(b) && checked.count == 2, "Deselect all clears the rows it is given")
+    checked.deselectAll(drawn)
+    check(checked.isEmpty, "including when every row is already clear")
+
+    // A check belongs to a lot, so a run that replaces the board drops the ids that are gone — and
+    // keeps the ones that are still there.
+    checked.selectAll(drawn)
+    checked.prune(to: [b, UUID()])
+    check(checked.ids == [b], "pruning drops the checked lots that left the board", detail: "\(checked.count) left")
+    checked.prune(to: [b])
+    check(checked.contains(b), "and a check on a lot that is still there survives the run")
+    checked.prune(to: [])
+    check(checked.isEmpty, "an empty board clears the selection rather than keeping it alive")
+}
+
+// MARK: - 38. DeepSeek: the batched manifest route
+
+do {
+    print("38. DeepSeek reads a gallery in batches into a manifest, then prices it in one text-only request")
+    let script = StubScript([
+        .init(status: 200, body: frameBytes(1), headers: ["Content-Type": "image/jpeg"]), // frame 1
+        .init(status: 200, body: frameBytes(2), headers: ["Content-Type": "image/jpeg"]), // frame 2
+        .init(status: 200, body: frameBytes(3), headers: ["Content-Type": "image/jpeg"]), // frame 3
+        // Batch 1 saw the candles twice and read the model number; batch 2 saw them again from the side.
+        .init(status: 200, body: manifestBody([
+            StubManifestLine(
+                name: "Yankee Candle 22 oz jar", brand: "Yankee Candle", model: "1631666",
+                quantity: 6, views: [1, 2], identifiers: ["609032993551"]
+            )
+        ])),
+        .init(status: 200, body: manifestBody([
+            StubManifestLine(name: "Yankee Candle 22oz jar", brand: "Yankee", quantity: 4, views: [3]),
+            StubManifestLine(name: "Energizer MAX AA, 24-pack", brand: "Energizer", quantity: 2, views: [3])
+        ])),
+        .init(status: 200, body: deepSeekSuccessBody) // the pricing pass
+    ])
+    let service = makeDeepSeekService(script, requestsPerMinute: 0, maxAttempts: 1, photosPerRequest: 2)
+    let outcome = try await service.value(subject: threePhotoSubject)
+
+    check(outcome.passes == 3, "three requests produced the figures: two batches and one pricing pass", detail: "\(outcome.passes)")
+    check(outcome.imagesSent == 3, "every photograph of the gallery travelled", detail: "\(outcome.imagesSent)")
+    let manifest = outcome.manifest ?? PalletManifest()
+    check(manifest.count == 2, "the batches folded into two distinct items, not three", detail: "\(manifest.count)")
+    check(manifest.items.first?.quantity == 6, "a product seen in both batches keeps the larger count, not the sum", detail: "\(manifest.items.first?.quantity ?? -1)")
+    check(manifest.items.first?.views == [1, 2, 3], "and names every photograph it was seen in", detail: "\(manifest.items.first?.views ?? [])")
+    check(manifest.items.first?.brand == "Yankee Candle", "the batch that named the brand properly keeps the field")
+    check(manifest.items.first?.modelNumber == "1631666", "and the model number survives from the batch that read it")
+    check(manifest.unitCount == 8, "the inventory accounts for 6 candles and 2 battery packs", detail: "\(manifest.unitCount)")
+    check(manifest.photographCount == 3, "read across all three photographs", detail: "\(manifest.photographCount)")
+    check(outcome.items.count == 1, "the pricing pass's line items are the outcome", detail: "\(outcome.items.count)")
+
+    let chats = script.requests.filter { $0.url.absoluteString == "https://api.deepseek.com/chat/completions" }
+    check(chats.count == 3, "two manifest requests and one pricing request were posted", detail: "\(chats.count)")
+
+    // Batches are sent a few at a time, so which one the stub answered first is not a fact about the app:
+    // the requests are identified by what they carry, not by the order they arrived in.
+    let firstBatchChat = chats.first { userText(in: $0).contains("Batch 1 of 2") }
+    let secondBatchChat = chats.first { userText(in: $0).contains("Batch 2 of 2") }
+    let pricingChat = chats.first { imageURLs(in: $0).isEmpty }
+    check(imageURLs(in: firstBatchChat).count == 2, "the first batch carries two photographs", detail: "\(imageURLs(in: firstBatchChat).count)")
+    check(imageURLs(in: secondBatchChat).count == 1, "the second carries the one left over", detail: "\(imageURLs(in: secondBatchChat).count)")
+    check(imageURLs(in: pricingChat).isEmpty, "the pricing request carries no photographs at all")
+
+    let firstBatch = userText(in: firstBatchChat)
+    check(firstBatch.contains("Batch 1 of 2"), "the batch says which it is", detail: String(firstBatch.prefix(80)))
+    check(firstBatch.contains("photographs 1-2 of 3 are attached"), "and states the gallery numbers it carries, which is what views is answered in")
+    check(userText(in: secondBatchChat).contains("photograph 3 of 3 is attached"), "the last batch says its single frame is attached")
+    check(systemText(in: firstBatchChat).contains("cataloguing ONE liquidation-auction pallet"), "the batch gets the manifest instruction")
+    check(systemText(in: firstBatchChat).contains("SAME pallet"), "which is where the deduplication rule lives")
+    check(firstBatch.contains("Pallet of candles and batteries"), "the batch receives the scraped listing text")
+    check(firstBatch.contains("\"manifest\""), "and the schema it must answer in")
+    check(firstBatch.contains("additionalProperties"), "rendered in full, as JSON mode requires")
+
+    let pricing = userText(in: pricingChat)
+    check(systemText(in: pricingChat).contains("No photographs are attached"), "the pricing instruction says what it is pricing from")
+    check(pricing.contains("1631666"), "the pricing prompt is handed the model number the batches read")
+    check(pricing.contains("609032993551"), "and the barcode digits")
+    check(pricing.contains("2 distinct item(s)"), "with the inventory's own size stated", detail: String(pricing.prefix(120)))
+    check(pricing.contains("8 unit(s)"), "and its unit count", detail: String(pricing.prefix(120)))
+    check(pricing.lowercased().contains("json"), "and the word json, which JSON mode requires")
+    check(pricing.contains("\"itemName\""), "plus the line-item schema it must answer in")
+
+    for (index, chat) in chats.enumerated() {
+        let format = chat.json["response_format"] as? [String: Any]
+        check(format?["type"] as? String == "json_object", "request \(index + 1) asked for JSON object mode", detail: "\(format ?? [:])")
+    }
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 39. The manifest's own fold
+
+do {
+    print("39. A product seen twice is one manifest line, and an empty manifest is not an error")
+    var manifest = PalletManifest()
+    manifest.absorb([
+        ManifestItem(
+            itemName: "Yankee Candle 22 oz jar", brand: "Yankee Candle", modelNumber: "1631666",
+            category: "household", quantity: 6, condition: "new", identifiers: ["609032993551"],
+            labelText: "Yankee Candle 22 oz", confidence: "High", views: [1, 2]
+        )
+    ])
+    manifest.absorb([
+        ManifestItem(itemName: "yankee candle, 22oz jar", brand: "Yankee", quantity: 9, confidence: "Low", views: [3]),
+        ManifestItem(itemName: "Energizer MAX AA, 24-pack", brand: "Energizer", quantity: 2, views: [4, 5])
+    ])
+
+    check(manifest.count == 2, "two products, however many batches saw them", detail: "\(manifest.count)")
+    check(manifest.items[0].quantity == 9, "the larger count wins — a second angle is not more goods", detail: "\(manifest.items[0].quantity)")
+    check(manifest.items[0].views == [1, 2, 3], "views accumulate", detail: "\(manifest.items[0].views)")
+    check(manifest.items[0].modelNumber == "1631666", "a field one batch read is kept when the other did not")
+    check(manifest.items[0].condition == "new" && manifest.items[0].labelText == "Yankee Candle 22 oz",
+          "and the same for the condition and the label wording")
+    check(manifest.items[0].confidence == "High", "confidence keeps the strongest of the two sightings", detail: manifest.items[0].confidence)
+    check(manifest.items[0].confidenceLevel == .high, "which normalises to the typed vocabulary")
+    check(manifest.items[0].detailPhrase.contains("photographs 1, 2, 3"), "the card's line names the frames", detail: manifest.items[0].detailPhrase)
+    check(manifest.unitCount == 11 && manifest.photographCount == 5, "the roll-ups count units and frames", detail: manifest.logPhrase)
+    check(manifest.compactPhrase == "2 item(s) · 11 unit(s)", "and the row's shorter form reads off the same numbers", detail: manifest.compactPhrase)
+
+    // A different model number is a different product, whatever the name says.
+    var split = PalletManifest()
+    split.absorb([ManifestItem(itemName: "AA batteries", modelNumber: "E91BP-24", quantity: 1)])
+    split.absorb([ManifestItem(itemName: "AA batteries", modelNumber: "E91BP-48", quantity: 1)])
+    check(split.count == 2, "two model numbers are two products", detail: "\(split.count)")
+
+    // The decode, both ways: an empty inventory is an answer, garbage is a failure.
+    let empty = try LotManifestAnswer.items(fromAnswerText: #"{"manifest":[]}"#, finishReason: "stop")
+    check(empty.isEmpty, "an empty manifest decodes to no items rather than failing")
+    let decoded = try LotManifestAnswer.items(
+        fromAnswerText: #"{"manifest":[{"itemName":" Candles ","quantity":6.0,"views":[1,1,2],"confidence":"high"}]}"#,
+        finishReason: "stop"
+    )
+    check(decoded.count == 1 && decoded[0].itemName == "Candles", "one line decodes with its wording tidied", detail: decoded.first?.itemName ?? "—")
+    check(decoded[0].quantity == 6, "a JSON-mode 6.0 is six units", detail: "\(decoded[0].quantity)")
+    check(decoded[0].views == [1, 2], "views are deduped and sorted", detail: "\(decoded[0].views)")
+    check(decoded[0].confidence == "High", "and confidence is normalised", detail: decoded[0].confidence)
+
+    var threw = false
+    do { _ = try LotManifestAnswer.items(fromAnswerText: #"{"items":[]}"#, finishReason: "stop") } catch { threw = true }
+    check(threw, "an answer with no manifest key fails rather than reading as an empty pallet")
+
+    let rendered = LotManifestPrompt.render(manifest)
+    check(rendered.omitted == 0 && rendered.text.hasPrefix("["), "the pricing prompt's manifest slab renders as a JSON array")
+    check(rendered.text.contains("1631666") && !rendered.text.contains("\"id\""),
+          "with the model numbers in it and no ids, because the model never produced one")
+
+    // A reply can only enumerate so much, so a long inventory is priced in pieces.
+    let thirteen = PalletManifest(items: (1...13).map { ManifestItem(itemName: "Item \($0)", quantity: 1) })
+    let pieces = thirteen.batches(ofSize: 12)
+    check(pieces.count == 2, "thirteen items are two reply-sized pieces", detail: "\(pieces.count)")
+    check(pieces.map(\.count) == [12, 1], "twelve and the one left over", detail: "\(pieces.map(\.count))")
+    check(thirteen.batches(ofSize: 12).flatMap(\.items).count == 13, "and nothing is lost in the split")
+    check(thirteen.batches(ofSize: 20).count == 1, "an inventory that fits one reply stays one piece")
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 40. Splitting a gallery into batches
+
+do {
+    print("40. A gallery is split into batches by frame count and by bytes, and every frame travels")
+    func image(_ index: Int, bytes: Int) -> LotImage {
+        LotImage(
+            mimeType: "image/jpeg",
+            base64: "",
+            byteCount: bytes,
+            sourceURL: URL(string: "https://cdn.example.test/frame-\(index).jpg")!
+        )
+    }
+    let images = (1...7).map { image($0, bytes: $0 * 100) }
+
+    let byCount = LotImageLoader.batches(of: images, width: 3, perRequestBytes: 1_000_000)
+    check(byCount.map(\.count) == [3, 3, 1], "batches take three frames each, the last one short", detail: "\(byCount.map(\.count))")
+    check(byCount.flatMap(\.self).map(\.sourceURL) == images.map(\.sourceURL),
+          "every frame travels exactly once, in gallery order")
+    check(byCount.flatMap(\.self).count == images.count, "nothing is dropped and nothing is duplicated")
+
+    // 100 + 200 fits 350; 300 on top of that does not, so the batch closes and the next one starts.
+    let byBytes = LotImageLoader.batches(of: images, width: 10, perRequestBytes: 350)
+    check(byBytes.map(\.count) == [2, 1, 1, 1, 1, 1], "a byte ceiling splits the run too", detail: "\(byBytes.map(\.count))")
+    check(byBytes.allSatisfy { !$0.isEmpty }, "and no batch is ever empty")
+
+    // A single frame larger than the whole budget travels on its own rather than stalling the walk.
+    let oversized = LotImageLoader.batches(of: [image(1, bytes: 900), image(2, bytes: 900)], width: 5, perRequestBytes: 500)
+    check(oversized.map(\.count) == [1, 1], "a frame over the budget goes alone", detail: "\(oversized.map(\.count))")
+
+    let zeroWidth = LotImageLoader.batches(of: images, width: 0, perRequestBytes: 1_000_000)
+    check(zeroWidth.map(\.count) == Array(repeating: 1, count: 7), "a width of zero reads one frame per batch", detail: "\(zeroWidth.map(\.count))")
+    check(LotImageLoader.batches(of: [], width: 6, perRequestBytes: 1_000).isEmpty, "an empty gallery makes no batches")
+}
+
+// MARK: - 41. A batched route that finds nothing falls back
+
+do {
+    print("41. A manifest of nothing falls back to the gallery pass rather than failing the lot")
+    let script = StubScript([
+        .init(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"]), // the photograph
+        .init(status: 200, body: manifestBody([])),                                   // the batch: nothing sellable
+        .init(status: 200, body: deepSeekSuccessBody),                                // the text pass
+        .init(status: 200, body: deepSeekSuccessBody)                                 // the gallery pass
+    ])
+    let reports = ReportLog()
+    let service = makeDeepSeekService(
+        script,
+        requestsPerMinute: 0,
+        maxAttempts: 1,
+        photosPerRequest: 4,
+        report: { reports.note($0) }
+    )
+    let outcome = try await service.value(subject: onePhotoSubject)
+
+    check(outcome.items.count == 1, "the lot is still valued", detail: "\(outcome.items.count)")
+    check(outcome.manifest == nil, "with no inventory to show, because there was not one")
+    check(outcome.passes == 2, "so the two-pass route ran instead", detail: "\(outcome.passes)")
+    check(outcome.imagesSent == 1, "and the photograph travelled with the gallery pass", detail: "\(outcome.imagesSent)")
+    check(
+        reports.events.contains { if case .fallingBackFromManifest = $0 { return true } else { return false } },
+        "and the console was told why the batch route was abandoned"
+    )
+    check(
+        reports.events.contains { if case .manifesting = $0 { return true } else { return false } },
+        "after announcing the batch it was about to send"
+    )
+    let chats = script.requests.filter { $0.url.absoluteString == "https://api.deepseek.com/chat/completions" }
+    check(chats.count == 3, "batch, text pass, gallery pass", detail: "\(chats.count)")
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 42. A fallback out of the batched route trims to one request
+
+do {
+    print("42. A gallery the batches could hold is trimmed back to one request when the route falls back")
+    let budget = jpegBytes.count + 10 // one frame fits one request; two do not
+    let script = StubScript([
+        .init(status: 200, body: frameBytes(1), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(2), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(3), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: manifestBody([])), // batch 1: nothing sellable
+        .init(status: 200, body: manifestBody([])), // batch 2
+        .init(status: 200, body: manifestBody([])), // batch 3
+        .init(status: 200, body: deepSeekSuccessBody), // the text pass
+        .init(status: 200, body: deepSeekSuccessBody)  // the gallery pass
+    ])
+    let service = makeDeepSeekService(
+        script,
+        requestsPerMinute: 0,
+        maxAttempts: 1,
+        maxTotalImageBytes: budget,
+        photosPerRequest: 6
+    )
+    let outcome = try await service.value(subject: threePhotoSubject)
+
+    check(outcome.items.count == 1, "the lot is still valued", detail: "\(outcome.items.count)")
+    check(outcome.imagesSent == 1, "the fallback carried one request's worth of the gallery", detail: "\(outcome.imagesSent)")
+    check(outcome.imagesSkipped == 2, "and counted the two frames that would not fit", detail: "\(outcome.imagesSkipped)")
+
+    let chats = script.requests.filter { $0.url.absoluteString == "https://api.deepseek.com/chat/completions" }
+    check(chats.count == 5, "three batches, the text pass and the gallery pass", detail: "\(chats.count)")
+    check(imageURLs(in: chats.last).count == 1, "the gallery pass carried exactly the frame that fits", detail: "\(imageURLs(in: chats.last).count)")
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 43. A long inventory is priced in reply-sized pieces
+
+do {
+    print("43. A 13-item manifest is priced in two requests rather than one truncated reply")
+    let lines = (1...13).map { StubManifestLine(name: "Item \($0)", quantity: 1, views: [$0]) }
+    let script = StubScript([
+        .init(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: manifestBody(lines)),
+        .init(status: 200, body: deepSeekSuccessBody),
+        .init(status: 200, body: deepSeekSuccessBody)
+    ])
+    let service = makeDeepSeekService(script, requestsPerMinute: 0, maxAttempts: 1, photosPerRequest: 6)
+    let outcome = try await service.value(subject: onePhotoSubject)
+
+    check(outcome.manifest?.count == 13, "the batch's thirteen items became the manifest", detail: "\(outcome.manifest?.count ?? -1)")
+    check(outcome.passes == 3, "one batch plus two pricing requests", detail: "\(outcome.passes)")
+
+    let chats = script.requests.filter { $0.url.absoluteString == "https://api.deepseek.com/chat/completions" }
+    check(chats.count == 3, "one batch and two text-only pricing requests", detail: "\(chats.count)")
+    check(imageURLs(in: chats[1]).isEmpty && imageURLs(in: chats[2]).isEmpty,
+          "neither pricing request carries a photograph")
+    check(userText(in: chats[1]).contains("12 distinct item(s)"), "the first piece holds twelve", detail: String(userText(in: chats[1]).prefix(110)))
+    check(userText(in: chats[2]).contains("1 distinct item(s)"), "the second holds the one left over", detail: String(userText(in: chats[2]).prefix(110)))
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 44. A photograph the gallery lists twice travels once
+
+do {
+    print("44. The batched route sends a repeated photograph once, and says what it left out")
+    // What a re-listed lot offers: the same picture at two addresses, and a photograph of something
+    // else. Identical pixels are the only fold this route makes, and the one that cannot lose anything —
+    // there is nothing in the second copy that the first does not show.
+    let picture = detailedPNGBytes(seed: 1)
+    let other = detailedPNGBytes(seed: 2)
+    let repeatedSubject = ValuationSubject(
+        lotNumber: "311",
+        title: "Pallet of candles",
+        rawDescription: "Mixed lot, 20 pieces.",
+        currentBid: 60,
+        imageURLs: [
+            URL(string: "https://cdn.example.test/lot-311-1.jpg")!,
+            URL(string: "https://cdn.example.test/lot-311-2.jpg")!,
+            URL(string: "https://cdn.example.test/lot-311-3.jpg")!
+        ],
+        detailURL: nil
+    )
+    let script = StubScript([
+        .init(status: 200, body: picture, headers: ["Content-Type": "image/png"]), // frame 1
+        .init(status: 200, body: picture, headers: ["Content-Type": "image/png"]), // frame 2: the same file
+        .init(status: 200, body: other, headers: ["Content-Type": "image/png"]),   // frame 3
+        .init(status: 200, body: manifestBody([
+            StubManifestLine(
+                name: "Yankee Candle 22 oz jar", brand: "Yankee Candle", quantity: 6, views: [1]
+            )
+        ])),
+        .init(status: 200, body: manifestBody([
+            StubManifestLine(name: "Yankee Candle 22oz jar", brand: "Yankee", quantity: 4, views: [3])
+        ])),
+        .init(status: 200, body: deepSeekSuccessBody) // the pricing pass
+    ])
+    let reports = ReportLog()
+    let service = makeDeepSeekService(
+        script,
+        requestsPerMinute: 0,
+        maxAttempts: 1,
+        photosPerRequest: 1,
+        report: { reports.note($0) }
+    )
+    let outcome = try await service.value(subject: repeatedSubject)
+
+    check(outcome.items.count == 1, "the lot is valued", detail: "\(outcome.items.count)")
+    check(outcome.manifest?.count == 1,
+          "and the two sightings became one manifest line, however each batch named it",
+          detail: "\(outcome.manifest?.count ?? -1)")
+
+    let chats = script.requests.filter { $0.url.absoluteString == "https://api.deepseek.com/chat/completions" }
+    check(chats.count == 3, "two batches and one pricing request were posted", detail: "\(chats.count)")
+    let batches = chats.filter { !imageURLs(in: $0).isEmpty }
+    check(batches.count == 2, "only the frames that are not repeats were sent", detail: "\(batches.count)")
+    let sent = batches.flatMap { imageURLs(in: $0) }
+    check(sent.count == 2 && Set(sent).count == 2,
+          "and the two that were sent are different photographs, not one picture bought twice",
+          detail: "\(sent.count) image(s), \(Set(sent).count) distinct")
+
+    // The frames the batches name, in the gallery's own numbering — read off the prompts, because which
+    // frame the stub served which picture to is not a fact about the app.
+    let named = batches.compactMap { photographNumber(in: userText(in: $0), of: 3) }.sorted()
+    check(named.count == 2 && Set(named).count == 2,
+          "each batch states the gallery number of the frame it carries",
+          detail: "\(named) from \(batches.map { String(userText(in: $0).suffix(60)) }.joined(separator: " || "))")
+
+    // What was left out is said out loud, with what it was left out for: a fold the operator cannot see
+    // is indistinguishable from a photograph that went missing.
+    let folded = reports.events.compactMap { event -> PhotoView? in
+        guard case .folded(let view) = event else { return nil }
+        return view
+    }
+    check(folded.count == 1, "the console was told once, as it happened", detail: "\(folded.count)")
+    let leftOut = folded.first?.folds.map(\.frame) ?? []
+    check(leftOut.count == 1, "with the one repeated photograph left out", detail: "\(leftOut)")
+    check(leftOut.allSatisfy { !named.contains($0) },
+          "and it is the frame no batch named, rather than one that was also sent",
+          detail: "left out \(leftOut), batches named \(named)")
+    check(folded.first.map { named.contains($0.representative) } == true,
+          "while the frame its reading stands on is one that was sent",
+          detail: "representative \(String(describing: folded.first?.representative)), sent \(named)")
+    check(folded.first?.batchLogPhrase.contains("same picture as photograph") == true,
+          "the line says what the two frames have in common",
+          detail: folded.first?.batchLogPhrase ?? "—")
+    check(folded.first?.batchLogPhrase.contains("left out of the batches") == true,
+          "and says what became of it, rather than claiming it was read")
+
+    check(outcome.imagesSent == 3,
+          "every photograph of the gallery is still accounted for", detail: "\(outcome.imagesSent)")
+    check(outcome.passes == 3, "two batches plus the pricing pass", detail: "\(outcome.passes)")
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 45. What makes two sightings one product
+
+do {
+    print("45. A shared code folds two sightings whatever they were named, and what disagrees keeps them apart")
+
+    // The case the fold exists for: one carton, two batches, two names for it. What joins them is the
+    // barcode read off the goods — the one thing on a carton that is not an opinion.
+    let decoded = ManifestItem(
+        itemName: "Cold Brew Coffee, 12 fl oz", brand: "Stok", identifiers: ["609032993551"]
+    )
+    let namedDifferently = ManifestItem(
+        itemName: "iced coffee 12oz bottle", brand: "Stok", identifiers: ["609032993551"]
+    )
+    check(decoded.isSameProduct(as: namedDifferently),
+          "a barcode both sightings carry identifies the product for both, whatever they were called",
+          detail: "\(decoded.displayName) vs \(namedDifferently.displayName)")
+
+    // Which is why the route folds the app's own reading of every frame into the batch answers: a code has
+    // to be on *both* sightings to join them, and the batch that could not see the barcode otherwise
+    // carries none.
+    check(!decoded.isSameProduct(as: ManifestItem(itemName: "iced coffee 12oz bottle", brand: "Stok")),
+          "while a code only one sighting carries is not a shared one")
+
+    check(ManifestItem(itemName: "Coffee", identifiers: ["0123456789012"])
+            .isSameProduct(as: ManifestItem(itemName: "iced coffee", modelNumber: "0123456789012")),
+          "and the same digits read as an identifier or as a model number are still one code")
+
+    // A code outranks a model number, because a barcode is decoded off the goods and a model number is
+    // read off a label.
+    check(ManifestItem(itemName: "Coffee", modelNumber: "A1", identifiers: ["0123456789012"])
+            .isSameProduct(as: ManifestItem(itemName: "Coffee", modelNumber: "A2", identifiers: ["0123456789012"])),
+          "and it outranks a model number the two batches read differently")
+
+    // The same carton named at two lengths of breath — what comparing *words* buys over comparing strings.
+    check(ManifestItem(itemName: "Yankee Candle 22 oz jar", brand: "Yankee Candle")
+            .isSameProduct(as: ManifestItem(itemName: "yankee candles, 22oz", brand: "Yankee")),
+          "one carton described two ways is one product")
+    check(ManifestItem(itemName: "Energizer MAX AA, 24-pack", brand: "Energizer")
+            .isSameProduct(as: ManifestItem(itemName: "Energizer MAX AA (24 pack)", brand: "Energizer")),
+          "and so is one size written two ways")
+
+    // What must never fold: the count, the size and the number that tell two products apart.
+    check(!ManifestItem(itemName: "Energizer MAX AA, 24-pack", brand: "Energizer")
+            .isSameProduct(as: ManifestItem(itemName: "Energizer MAX AA, 48-pack", brand: "Energizer")),
+          "a pack count that disagrees is two different cases")
+    check(!ManifestItem(itemName: "Energizer MAX AA, 24-pack", brand: "Energizer")
+            .isSameProduct(as: ManifestItem(itemName: "Energizer MAX AAA, 24-pack", brand: "Energizer")),
+          "and so is a different battery size")
+    check(!ManifestItem(itemName: "AA batteries", modelNumber: "E91BP-24")
+            .isSameProduct(as: ManifestItem(itemName: "AA batteries", modelNumber: "E91BP-48")),
+          "two model numbers are two products, whatever the name says")
+    check(!ManifestItem(itemName: "AA batteries", brand: "Duracell")
+            .isSameProduct(as: ManifestItem(itemName: "AA batteries", brand: "Energizer")),
+          "and two brands are two products")
+
+    // Only codes *shaped* like one count: a pallet's every carton carries a freight label, and a number
+    // that could be a price, a quantity or a tracking number must not fold a pallet into one line.
+    check(!ManifestItem(itemName: "Paper towels", identifiers: ["12"])
+            .isSameProduct(as: ManifestItem(itemName: "Trash bags", identifiers: ["12"])),
+          "a bare short number is not a product code")
+    check(!ManifestItem(itemName: "Paper towels", identifiers: ["ASSORTED"])
+            .isSameProduct(as: ManifestItem(itemName: "Trash bags", identifiers: ["ASSORTED"])),
+          "and neither is a word")
+
+    // The same question end to end, through the route that has to answer it: three photographs read as two
+    // batches, each batch naming the same goods differently and quoting the same digits off the carton.
+    let script = StubScript([
+        .init(status: 200, body: frameBytes(1), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(2), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(3), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: manifestBody([
+            StubManifestLine(
+                name: "Cold Brew Coffee, 12 fl oz", brand: "Stok", quantity: 6, views: [1],
+                identifiers: ["609032993551"]
+            )
+        ])),
+        .init(status: 200, body: manifestBody([
+            StubManifestLine(
+                name: "iced coffee 12oz bottle", brand: "Stok", quantity: 4, views: [3],
+                identifiers: ["609032993551"]
+            )
+        ])),
+        .init(status: 200, body: deepSeekSuccessBody) // the pricing pass
+    ])
+    let service = makeDeepSeekService(script, requestsPerMinute: 0, maxAttempts: 1, photosPerRequest: 2)
+    let outcome = try await service.value(subject: threePhotoSubject)
+    let manifest = outcome.manifest ?? PalletManifest()
+    check(manifest.count == 1,
+          "two batches that read one barcode off the goods are one manifest line",
+          detail: manifest.items.map(\.displayName).joined(separator: " | "))
+    check(manifest.items.first?.views == [1, 3],
+          "naming every photograph it was seen in", detail: "\(manifest.items.first?.views ?? [])")
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 46. The reader's second kind of evidence
+
+do {
+    print("46. The reader keeps the wording that names goods and drops the paperwork around them")
+    let lines = [
+        "Cold Brew Coffee",
+        "12 fl oz (355 mL)",
+        "SKU: 4711",
+        "Ship To: DC 4 - Aisle 12",
+        "www.example.com/track",
+        "Tel: 555-0100",
+        "Yankee Candle Company",
+        "Fragile - This Side Up",
+        String(repeating: "long ", count: 20)
+    ]
+    let kept = LotImageDigest.labelLines(in: lines)
+    check(kept == ["Cold Brew Coffee", "Yankee Candle Company"],
+          "only the two lines that name goods survive the filter", detail: "\(kept)")
+
+    let evidence = LotImageEvidence(barcodes: ["0123456789012"], labelText: kept, imagesRead: 1)
+    check(evidence.promptLines.contains {
+            $0.contains("Wording read off the packing: Cold Brew Coffee · Yankee Candle Company")
+          },
+          "and the model is handed them as wording it did not have to read",
+          detail: evidence.promptLines.joined(separator: " | "))
+    check(evidence.logPhrase.contains("label wording Cold Brew Coffee · Yankee Candle Company"),
+          "which the console repeats, so a price can be read against what it was built on",
+          detail: evidence.logPhrase)
+    check(!LotImageEvidence(labelText: ["Cold Brew Coffee"]).isEmpty,
+          "wording on its own is something legible, not nothing")
+
+    let merged = LotImageDigest.merge([
+        LotImageEvidence(labelText: ["Cold Brew Coffee"], imagesRead: 1),
+        LotImageEvidence(labelText: ["Yankee Candle Company"], imagesRead: 1)
+    ])
+    check(merged.labelText == ["Cold Brew Coffee", "Yankee Candle Company"] && merged.imagesRead == 2,
+          "and the lot-wide roll-up keeps both frames' wording", detail: "\(merged.labelText)")
 }
 
 print(tally.value == 0 ? "\nALL CHECKS PASSED" : "\n\(tally.value) CHECK(S) FAILED")

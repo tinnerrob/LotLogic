@@ -208,6 +208,7 @@ final class AnalysisCoordinator {
                 modelID: settings.activeModelID,
                 requestsPerMinute: settings.requestsPerMinute,
                 photoScan: plan,
+                photosPerRequest: settings.effectivePhotosPerRequest,
                 report: report
             )
         }
@@ -234,8 +235,8 @@ final class AnalysisCoordinator {
     ///
     /// The note is written only while the row is still being read. A report is delivered from another
     /// task, so one can land after the scan has already finished — and a completed row wearing
-    /// `photograph 12 of 12` would read as a scan that never ended. The readout's step is taken from the
-    /// report either way: it is what says which row the modal's money line is speaking for.
+    /// `photograph 12 of 12 read` would read as a scan that never ended. The readout's step is taken from
+    /// the report either way: it is what says which row the modal's money line is speaking for.
     private func record(_ report: PhotoScanReport, on lot: LotItem) {
         log(report.logLine, source: .valuation)
         // The report names a step to *start* or one that has just landed; `nil` means it closed
@@ -319,6 +320,43 @@ final class AnalysisCoordinator {
     /// at least one lot with neither a valuation nor an eval to give.
     var canPrePriceUnvalued: Bool {
         canScan && !isScanning && lots.contains { !$0.hasValuation && !$0.isPrePriced }
+    }
+
+    /// Whether **Price selected** is live: the same gate as **Price all**, narrowed to the checked
+    /// rows — so the button is dead both when nothing can be priced and when nothing is checked.
+    ///
+    /// The two **…selected** buttons are the batch buttons *narrowed*, not a third kind of work, which
+    /// is why they take the same gate and are exclusive with the others on the same terms.
+    func canScanSelected(_ selection: LotSelection) -> Bool {
+        canScan && !isScanning && !selectedLots(selection, for: .price).isEmpty
+    }
+
+    /// Whether **Eval selected** is live. Narrowed by **Eval all**'s own rule as well: a checked lot
+    /// that already carries a valuation has nothing an eval could show (see `selectedLots(_:for:)`),
+    /// so checking only valued rows leaves the button dead rather than paying for a hidden number.
+    func canPrePriceSelected(_ selection: LotSelection) -> Bool {
+        canScan && !isScanning && !selectedLots(selection, for: .eval).isEmpty
+    }
+
+    /// The checked lots a given pass can act on, in board order.
+    ///
+    /// **Price** adds no filter of its own: a checked row is an explicit request — the operator named
+    /// these lots — and that is the same standing as the row's own **Re-price**, which will price a
+    /// lot that already has numbers rather than assume it is finished with.
+    ///
+    /// **Eval** cannot be that permissive. A real valuation *hides* provisional figures
+    /// (`LotItem.showsProvisionalNumbers`), so evaluating a lot that has one spends money on a number
+    /// nothing displays — which is why the row's own **Eval** is disabled there and why **Eval
+    /// selected** skips the same rows. A lot carrying only a text-only eval is *not* skipped: checking
+    /// it and pressing the button is an explicit request, exactly as its own **Re-eval** is.
+    ///
+    /// Checked ids that are no longer on the board match nothing, so a stale check cannot keep either
+    /// button alive.
+    private func selectedLots(_ selection: LotSelection, for kind: AppraisalJob.Kind) -> [LotItem] {
+        lots.filter { lot in
+            guard selection.contains(lot.id) else { return false }
+            return kind == .eval ? !lot.hasValuation : true
+        }
     }
 
     /// Lots still waiting for a first appraisal — what **Price all** would work through.
@@ -461,7 +499,8 @@ final class AnalysisCoordinator {
         )
     }
 
-    /// The step the row in hand is on, in the words the modal prints: `Lot 19002 — photograph 5 of 12`.
+    /// The step the row in hand is on, in the words the modal prints: `Lot 19002 — 5 of 12 photograph(s)
+    /// answered`.
     var progressStep: String? {
         guard let lot = inHandLot, let step = inHandStep else { return nil }
         return "Lot \(lot.lotNumber) — \(step.phrase)"
@@ -521,9 +560,10 @@ final class AnalysisCoordinator {
     /// hand, and the board otherwise.
     ///
     /// The row in hand contributes its current step's share, so the bar creeps through a photographed
-    /// appraisal — one tick per photograph — instead of standing still for the two minutes a dozen
-    /// requests take. A step's share is always short of 1, so a row only ever counts as a whole row once
-    /// it has actually been answered.
+    /// appraisal — one tick per photograph answered, and never backwards, because the tick is a count of
+    /// answers rather than the frame number that happens to be in flight — instead of standing still for
+    /// the two minutes a dozen requests take. A step's share is always short of 1, so a row only ever
+    /// counts as a whole row once it has actually been answered.
     private var appraisalProgress: Double {
         if let job = appraisalJob, job.count > 0 {
             let answered = Double(answeredRows(in: job)) + inHandShare(in: job)
@@ -911,7 +951,7 @@ final class AnalysisCoordinator {
         statusText = "Appraising lot \(lot.lotNumber) with \(settings.activeModelID)"
         log(
             "Scanning lot \(lot.lotNumber) — \(settings.provider.displayName) "
-                + "\(settings.activeModelID), \(settings.photoScanSummary) on its lot page"
+                + "\(settings.activeModelID), \(settings.photoRouteSummary) on its lot page"
         )
 
         scanTasks[lot.id] = Task { @MainActor [weak self] in
@@ -1065,16 +1105,69 @@ final class AnalysisCoordinator {
 
     /// Evals every lot that has no figure at all — the table's **Eval all** button.
     ///
-    /// Bounded by the same batch width as a batch scan, so the cheap pass cannot outspend a run it is
-    /// arguably replacing. Lots that already carry a valuation or an eval are left alone rather than
-    /// re-evaluated: pressing the button twice must not pay twice. Sold lots are included — see
-    /// `canScanUnvalued`.
+    /// Lots that already carry a valuation or an eval are left alone rather than re-evaluated:
+    /// pressing the button twice must not pay twice. Its own **…selected** sibling does not work that
+    /// way, and `prePriceSelected(_:)` says why.
     func prePriceUnvalued() {
+        prePriceBatch(lots.filter { !$0.hasValuation && !$0.isPrePriced }, scope: .unvalued)
+    }
+
+    /// Evals exactly the lots the operator has checked — the table's **Eval selected** button.
+    ///
+    /// The same work as **Eval all** over a set picked by hand, so it is the same body, the same gate
+    /// and the same closing line. It is narrowed by the same rule as well: a checked lot that already
+    /// carries a valuation is skipped, because a valuation hides the provisional figures an eval writes
+    /// (the row's own **Eval** is disabled there for the same reason). A lot carrying only a text-only
+    /// eval *is* re-evaluated: unlike **Eval all**, which must not pay twice for one click, checking a
+    /// row and pressing the button is a request and is honoured as one, exactly as that row's own
+    /// **Re-eval** would be.
+    func prePriceSelected(_ selection: LotSelection) {
+        prePriceBatch(selectedLots(selection, for: .eval), scope: .selected)
+    }
+
+    /// Which rows a batch was built for — the one thing an **…all** batch and an **…selected** batch do
+    /// not share.
+    ///
+    /// The service, the batch width, the readout and the closing line are identical; only the rows and
+    /// the words that name them differ. Keeping those words here is what stops the two pairs of buttons
+    /// drifting into two different pieces of work.
+    private enum BatchScope {
+        /// The **…all** buttons: whatever on the board has no figure yet.
+        case unvalued
+
+        /// The **…selected** buttons: exactly the rows the operator checked.
+        case selected
+
+        /// How a batch's status line and console line name their rows. The console already carried the
+        /// word for an **…all** batch; now the status line says it too.
+        var jobPhrase: String {
+            switch self {
+            case .unvalued: "unvalued lot(s)"
+            case .selected: "selected lot(s)"
+            }
+        }
+
+        /// What a batch with nothing in hand says instead of running — per *job*, because "nothing to
+        /// do" means something different to a cheap pass and a photographed one.
+        func emptyMessage(job: AppraisalJob.Kind) -> String {
+            switch (self, job) {
+            case (.unvalued, .eval): "Every lot already has a figure."
+            case (.unvalued, .price): "Every lot already has a valuation."
+            case (.selected, .eval): "Nothing checked to evaluate — a checked lot with numbers is skipped."
+            case (.selected, .price): "Nothing checked to price."
+            }
+        }
+    }
+
+    /// The body of **Eval all** and **Eval selected**: a text-only pass over `targets`.
+    ///
+    /// Bounded by the same batch width as a batch scan, so the cheap pass cannot outspend a run it is
+    /// arguably replacing. Sold lots are included — see `canScanUnvalued`.
+    private func prePriceBatch(_ targets: [LotItem], scope: BatchScope) {
         guard !isRunning, requireScanning() else { return }
 
-        let targets = lots.filter { !$0.hasValuation && !$0.isPrePriced }
         guard !targets.isEmpty else {
-            statusText = "Every lot already has a figure."
+            statusText = scope.emptyMessage(job: .eval)
             return
         }
 
@@ -1085,12 +1178,12 @@ final class AnalysisCoordinator {
         // The money line starts on the first row the batch will answer for.
         if let first = targets.first { pointReadout(at: first) }
         phase = .valuing
-        statusText = "Evaluating \(targets.count) lot(s) from their listing text"
+        statusText = "Evaluating \(targets.count) \(scope.jobPhrase) from their listing text"
         // A fresh batch re-reads every lot's page: the descriptions are what makes the text-only pass
         // worth paying for, and a page read during an earlier attempt must not stand in for this one.
         lotPageSubjects.removeAll()
         log(
-            "Evaluating \(targets.count) lot(s) with \(settings.provider.displayName) "
+            "Evaluating \(targets.count) \(scope.jobPhrase) with \(settings.provider.displayName) "
                 + "\(settings.activeModelID) — each lot's own description, no images, "
                 + "\(AppSettings.batchConcurrency) at a time"
                 + pacingSuffix(for: settings)
@@ -1204,16 +1297,32 @@ final class AnalysisCoordinator {
 
     /// Appraises every lot that has no valuation yet — the table's **Price all** button.
     ///
+    /// Sold lots are included — see `canScanUnvalued`.
+    func scanUnvalued() {
+        scanBatch(lots.filter { !$0.hasValuation }, scope: .unvalued)
+    }
+
+    /// Appraises exactly the lots the operator has checked — the table's **Price selected** button.
+    ///
+    /// **Price all** over a set picked by hand: the same body, the same gate, the same readout. It adds
+    /// no filter of its own, because a checked row is a request — it carries the same standing as that
+    /// row's own **Re-price**, which prices a lot that already has numbers rather than assuming the
+    /// operator is finished with it. See `selectedLots(_:for:)`.
+    func scanSelected(_ selection: LotSelection) {
+        scanBatch(selectedLots(selection, for: .price), scope: .selected)
+    }
+
+    /// The body of **Price all** and **Price selected**: one appraisal pass over `targets`.
+    ///
     /// Uses the same bounded-width task group the per-row button does, so
     /// `AppSettings.batchConcurrency` still means something, and it is exclusive with the per-row
-    /// button so a batch can never pay twice
-    /// for a lot somebody just clicked. Sold lots are included — see `canScanUnvalued`.
-    func scanUnvalued() {
+    /// button so a batch can never queue a second request
+    /// for a lot somebody just clicked.
+    private func scanBatch(_ targets: [LotItem], scope: BatchScope) {
         guard scanBatchTask == nil, scanTasks.isEmpty, requireScanning() else { return }
 
-        let targets = lots.filter { !$0.hasValuation }
         guard !targets.isEmpty else {
-            statusText = "Every lot already has a valuation."
+            statusText = scope.emptyMessage(job: .price)
             return
         }
 
@@ -1225,12 +1334,12 @@ final class AnalysisCoordinator {
         // As in `prePriceUnvalued`: the money line starts on the batch's first row.
         if let first = targets.first { pointReadout(at: first) }
         phase = .valuing
-        statusText = "Appraising \(targets.count) lot(s) with \(settings.activeModelID)"
+        statusText = "Appraising \(targets.count) \(scope.jobPhrase) with \(settings.activeModelID)"
         // A fresh batch re-reads every lot's page rather than reusing galleries from an earlier run.
         lotPageSubjects.removeAll()
         log(
-            "Scanning \(targets.count) unvalued lot(s) with \(settings.provider.displayName) "
-                + "\(settings.activeModelID), \(settings.photoScanSummary) on each lot page, "
+            "Scanning \(targets.count) \(scope.jobPhrase) with \(settings.provider.displayName) "
+                + "\(settings.activeModelID), \(settings.photoRouteSummary) on each lot page, "
                 + "\(AppSettings.batchConcurrency) at a time\(pacingSuffix(for: settings))"
         )
 
@@ -1439,7 +1548,9 @@ final class AnalysisCoordinator {
             outcome.items,
             imagesAnalyzed: outcome.imagesSent,
             passes: outcome.passes,
-            readings: outcome.readings
+            readings: outcome.readings,
+            groupedViews: outcome.groupedViews,
+            manifest: outcome.manifest
         )
         valuedCount += 1
         // What the app's own reader made of the photographs travels with the figures rather than
@@ -1462,12 +1573,29 @@ final class AnalysisCoordinator {
                     source: .valuation
                 )
             }
+            // What the scan did not pay for, and why that is not a frame it ignored: a folded frame is
+            // attached to the reconciliation instead of being read. Logged because a scan that spends
+            // fewer requests than its gallery has photographs owes an account of the difference.
+            if !outcome.groupedViews.isEmpty {
+                log(
+                    "Lot \(lot.lotNumber): \(lot.groupedViewsPhrase) — those frames still travel with "
+                        + "the reconciliation",
+                    source: .valuation
+                )
+            }
             if let reason = outcome.reconciliationFailure {
                 log(
                     "Lot \(lot.lotNumber): reconciled on this machine — \(reason)",
                     source: .valuation
                 )
             }
+        }
+        // The batched route's account, which is per *pallet* rather than per frame: what the photographs
+        // were read to hold, before the pricing pass turned it into money. Its own line because it is the
+        // one part of a batched appraisal an operator can check against the gallery without spending
+        // another request — and because the two routes' accounting must not be read as one.
+        if let manifest = outcome.manifest, !manifest.isEmpty {
+            log("Lot \(lot.lotNumber): manifest held \(manifest.logPhrase)", source: .valuation)
         }
         log(
             "Lot \(lot.lotNumber): \(outcome.items.count) item(s) — retail "

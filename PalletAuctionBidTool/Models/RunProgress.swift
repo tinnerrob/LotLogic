@@ -2,7 +2,8 @@
 //  RunProgress.swift
 //  PalletAuctionBidTool
 //
-//  What the progress readout counts: the pages a walk will read, and the rows an appraisal covers.
+//  What the progress readout counts: the pages a walk will read, the rows an appraisal covers, and the
+//  photographs a scan has answered.
 //
 
 import Foundation
@@ -68,8 +69,18 @@ struct PageWalkProgress {
 ///
 /// The pill says *which* row a job is on; this says what is being done to it, and it is why a scan no
 /// longer looks frozen between the row's own page read and the answer landing: a photographed appraisal
-/// is one GET for the lot's page, one text-only request, one request per photograph and one
-/// reconciliation, and the readout shows each of them as it happens (see `PhotoScanEvent`).
+/// is one GET for the lot's page, one text-only request, then either one request per photograph and one
+/// reconciliation (the thorough route) or one request per batch of photographs and one text-only
+/// request per dozen inventory lines (the batched one), and the readout shows each of them as it happens
+/// (see `PhotoScanEvent`).
+///
+/// The photograph step is a *count* of the frames with an answer rather than the frame in flight, and
+/// that is deliberate. Reads run a few at a time (`PhotoScanPlan.defaultConcurrency`) so no single frame
+/// is "the" frame being read: three are, and their numbers come back in whatever order the provider
+/// answers. A line — or a bar — built on the frame number therefore moves *backwards* (an operator
+/// watching a nine-frame scan saw `1 of 9`, `7 of 9`, `3 of 9`), which is worse than saying less. The
+/// count only ever goes up, and it is the same statement the bar needs. Which frame is being read stays
+/// where it belongs: the console's own line, and the row's live note.
 enum AppraisalStep: Equatable, Sendable {
 
     /// The row's own page is being read — the one GET that brings back its gallery *and* its
@@ -80,8 +91,13 @@ enum AppraisalStep: Equatable, Sendable {
     /// a **Price**.
     case evaluatingText
 
-    /// Photograph `index` of `of` is being read — the unit of work a thorough scan is built from.
-    case photograph(index: Int, of: Int)
+    /// How many of the row's gallery have an answer in hand, out of the frames that travel: the unit of
+    /// work a thorough scan is built from, counted rather than pointed at.
+    ///
+    /// An answered frame is one that was read, restored from this machine's store, or given up on — all
+    /// three are work that is over, and all three move the readout on. The frame *number* is not carried
+    /// here on purpose: see the type's own note on why the readout counts instead of naming one.
+    case photograph(answered: Int, of: Int)
 
     /// The whole gallery is going over in one pass, because reading it photograph by photograph came
     /// back with nothing readable.
@@ -90,6 +106,16 @@ enum AppraisalStep: Equatable, Sendable {
     /// The readings are being reconciled into the pallet's line items.
     case reconciling(readings: Int)
 
+    /// A settled manifest is being priced: text-only requests over the inventory (`LotManifestPrompt`,
+    /// `PalletManifest`), which carry names and counts instead of photographs — one request per dozen
+    /// lines, so usually one.
+    ///
+    /// Its own step rather than `reconciling`, because the two say different things and are counted in
+    /// different units — a reconciliation folds *readings* into line items, this looks *items* up in a
+    /// market and multiplies. The row's live note would be wrong under either name borrowed from the
+    /// other.
+    case pricingManifest(lines: Int)
+
     /// The line the modal prints while the row is on this step.
     var phrase: String {
         switch self {
@@ -97,12 +123,14 @@ enum AppraisalStep: Equatable, Sendable {
             "reading the lot's own page"
         case .evaluatingText:
             "evaluating from the listing text"
-        case .photograph(let index, let of):
-            "photograph \(index) of \(of)"
+        case .photograph(let answered, let of):
+            "\(answered) of \(of) photograph(s) answered"
         case .wholeGallery:
             "reading the whole gallery in one pass"
         case .reconciling(let readings):
             "reconciling \(readings) reading(s) into the line items"
+        case .pricingManifest(let lines):
+            "pricing \(lines) manifest line(s) into the pallet's items"
         }
     }
 
@@ -115,17 +143,28 @@ enum AppraisalStep: Equatable, Sendable {
     /// the reconciliation closes it out. A row is only ever *answered* once its work is over, so no step
     /// ever reaches 1: the last photograph of a seven-frame gallery and the reconciliation are both
     /// almost there, and "almost" is what the bar says until the answer lands.
+    ///
+    /// The photographs' bulk is added one *answered* frame at a time, in the order the answers land
+    /// rather than in gallery order, which is what keeps the bar going forwards: the reads are in flight
+    /// a few at a time, so gallery order is not an order the answers have. A frame the plan never reads —
+    /// over the **Photos / scan** ceiling, or folded into another frame's view (`PhotoFrameGrouping`) —
+    /// leaves the read phase short of the reconciliation's own share, which is where the bar picks the
+    /// rest up.
     var share: Double {
         switch self {
         case .readingPage:
             0.1
         case .evaluatingText:
             0.2
-        case .photograph(let index, let of):
-            min(0.9, 0.2 + 0.7 * (Double(max(index, 0)) / Double(max(of, 1))))
+        case .photograph(let answered, let of):
+            // The numerator is capped at the gallery, so a frame counted twice cannot claim more of the
+            // row than the reads themselves do.
+            0.2 + 0.7 * (Double(min(max(answered, 0), max(of, 1))) / Double(max(of, 1)))
         case .wholeGallery:
             0.6
         case .reconciling:
+            0.9
+        case .pricingManifest:
             0.9
         }
     }
@@ -245,24 +284,37 @@ struct LotMoney: Equatable, Sendable {
 extension AppraisalStep {
 
     /// The step a scan's own report names, or `nil` for a report that closes one out rather than
-    /// starting anything: a reconciliation that landed, or a fallback the pipeline already announced when
-    /// it decided to take it.
+    /// starting anything: a reconciliation that landed, a grouping announced before the reads, a
+    /// repeated photograph left out of the batches, or a fallback the pipeline already announced when it
+    /// decided to take it.
     ///
     /// One place for the mapping, so the readout's vocabulary can only be changed here — the pipeline
     /// reports what it is doing (`PhotoScanEvent`) and knows nothing about pills or bars.
     init?(_ event: PhotoScanEvent) {
         switch event {
-        case .reading(let index, let of, _):
-            self = .photograph(index: index, of: of)
-        case .read(let index, let of, _):
-            self = .photograph(index: index, of: of)
-        case .failed(let index, let of, _):
-            self = .photograph(index: index, of: of)
+        // All three of the frame events name the same step, because the readout counts answers rather
+        // than following a frame: a frame about to be read, one that landed and one that could not be
+        // read are each news about how much of the gallery is answered. The frame number itself stays in
+        // the console line the event also carries.
+        case .reading(_, let of, let answered, _),
+             .read(_, let of, let answered, _),
+             .failed(_, let of, let answered, _):
+            self = .photograph(answered: answered, of: of)
         case .aggregating(let photographs, _):
             self = .reconciling(readings: photographs)
-        case .fallingBack:
+        // The manifest route's two batch events are the frame events' trip through the same counter: a
+        // batch answered is so many of the gallery's photographs answered, which is what the readout
+        // counts. `.pricing` is the pricing pass starting; `.priced` closes the row out, so it names no
+        // step.
+        case .manifesting(_, _, _, let answered, let total),
+             .manifested(_, _, _, let answered, let total),
+             .manifestFailed(_, _, let answered, let total, _):
+            self = .photograph(answered: answered, of: total)
+        case .pricing(let items):
+            self = .pricingManifest(lines: items)
+        case .fallingBack, .fallingBackFromManifest:
             self = .wholeGallery
-        case .aggregated, .aggregatedLocally:
+        case .folded, .grouped, .aggregated, .aggregatedLocally, .priced, .manifestSettled:
             return nil
         }
     }

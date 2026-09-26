@@ -39,6 +39,10 @@ struct LotTableView: View {
     /// *which* columns are drawn is the operator's persisted choice (`settings.columnVisibility`),
     /// stamped onto this layout as it is drawn — see `layout`.
     @State private var widths = ColumnWidths.standard
+    /// Which rows are checked — what the header's box, the rows' own checkboxes and the two
+    /// **…selected** buttons all read and write. One value rather than a set kept per view, so nothing
+    /// can be checked in one place and unchecked in another.
+    @State private var selection = LotSelection()
     /// The lot page a row has asked to see, held as the sheet's item. The request lives here rather
     /// than inside a row because a row is a value: a `@State` in one would be discarded the moment the
     /// table re-sorts, and the page would vanish under the operator mid-read.
@@ -50,6 +54,16 @@ struct LotTableView: View {
     private var visibleLots: [LotItem] {
         LotSearch.filter(lots, query: query)
     }
+
+    /// The ids of the rows on screen, in the order they are drawn: what the header's select-all box
+    /// speaks for and what the table menu's two selection items act on.
+    private var drawnRowIDs: [UUID] { sortedLots.map(\.id) }
+
+    /// The ids of every lot on the board — what a selection is pruned against.
+    ///
+    /// The board rather than the drawn rows: a check made before a search has to survive the search,
+    /// and it is a new *run* that makes a check stale, not a query.
+    private var boardRowIDs: [UUID] { lots.map(\.id) }
 
     var body: some View {
         // The operator's column choice is read *here*, and stamped onto the dragged widths before the
@@ -70,6 +84,10 @@ struct LotTableView: View {
             GeometryReader { proxy in
                 body(viewport: proxy.size, layout: layout)
             }
+
+            Divider()
+
+            statusStrip
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.tableFill)
@@ -78,6 +96,12 @@ struct LotTableView: View {
         // through the same `lotPageSheet` modifier the control panel's **info** glyph uses, so the two
         // modals cannot be anything but the same modal.
         .lotPageSheet($pageRequest)
+        // A check belongs to a lot, and a run replaces the lots underneath it. Dropping the ids that
+        // are gone is what keeps **Price selected** from staying lit over an empty set — and a check
+        // that survives a re-scrape *of the same lot* is left alone, because rows keep their ids.
+        .onChange(of: boardRowIDs) { _, present in
+            selection.prune(to: present)
+        }
     }
 
     /// The table, or the state that stands in for it, in a known viewport.
@@ -112,7 +136,9 @@ struct LotTableView: View {
                         stored: layout,
                         drawn: drawn,
                         sort: $sort,
-                        direction: $direction
+                        direction: $direction,
+                        selection: $selection,
+                        drawnRowIDs: drawnRowIDs
                     )
                 }
             }
@@ -153,29 +179,45 @@ struct LotTableView: View {
 
     // MARK: - Toolbar
 
+    /// The controls: the finder, then the buttons that act on the board.
+    ///
+    /// The search box leads the strip. It is the one control up here an operator reaches for by feel
+    /// rather than by reading — a lot number off a bid sheet, typed while watching the rows — so it
+    /// holds the left edge, which is where the eye starts and where a finder belongs. What the table
+    /// *holds* is not printed here at all any more: `statusStrip` says that, under the rows it is
+    /// about.
     private var toolbar: some View {
         HStack(spacing: 10) {
-            Label("Lots", systemImage: "shippingbox")
-                .font(.subheadline.weight(.semibold))
-
-            countBadge(lots.count)
-
-            if LotSearch.isFiltering(query) {
-                Text("\(visibleLots.count) of \(lots.count) shown")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-
-            if coordinator.unvaluedCount > 0 {
-                Text("\(coordinator.unvaluedCount) waiting to be scanned")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            searchField
 
             Spacer(minLength: 12)
 
-            searchField
+            Button {
+                coordinator.prePriceSelected(selection)
+            } label: {
+                Label("Eval selected", systemImage: "text.magnifyingglass")
+            }
+            .controlSize(.small)
+            .disabled(!coordinator.canPrePriceSelected(selection))
+            .help(
+                "Gives each checked lot a cheap text-only eval from its listing text alone — the same "
+                    + "pass as Eval all, over the rows you checked and nothing else. A checked lot that "
+                    + "already carries a valuation is skipped, because a valuation hides the provisional "
+                    + "figure an eval writes; a checked lot carrying only an eval is evaluated again."
+            )
+
+            Button {
+                coordinator.scanSelected(selection)
+            } label: {
+                Label("Price selected", systemImage: "sparkles")
+            }
+            .controlSize(.small)
+            .disabled(!coordinator.canScanSelected(selection))
+            .help(
+                "Prices each checked lot from its photographs — Price all, over the rows you checked "
+                    + "and nothing else, using the provider and limits in Run Tuning. A checked lot is "
+                    + "priced even when it already has numbers, exactly as its own Re-price would be."
+            )
 
             Button {
                 coordinator.prePriceUnvalued()
@@ -253,6 +295,16 @@ struct LotTableView: View {
 
                 Divider()
 
+                // Deliberately not `toggleAll`: these two name a direction, so each one always goes
+                // that way. The header's box is the one that guesses, and says so in its tooltip.
+                Button("Select all") { selection.selectAll(drawnRowIDs) }
+                    .disabled(drawnRowIDs.isEmpty || selection.scope(of: drawnRowIDs) == .all)
+
+                Button("Deselect all") { selection.deselectAll(drawnRowIDs) }
+                    .disabled(selection.scope(of: drawnRowIDs) == .none)
+
+                Divider()
+
                 Button("Reset valuations", role: .destructive) {
                     coordinator.resetValuations()
                 }
@@ -263,12 +315,62 @@ struct LotTableView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("Expand or collapse every row, or clear every valuation and keep the scraped lots.")
+            .help("Expand or collapse every row, check or clear every row, or clear every valuation.")
         }
         .font(.caption)
         .controlSize(.small)
         .padding(.horizontal, Theme.rowInset + 4)
         .padding(.vertical, Theme.headerPadding)
+        .background(.bar)
+    }
+
+    // MARK: - Status strip
+
+    /// What the board holds, under the rows it is about.
+    ///
+    /// These readouts used to sit in the toolbar, and they did not belong there: the toolbar is a row
+    /// of things to *click*, and a lot count is not one of them — it moves while a run scrapes, while
+    /// every control beside it stays exactly where it was, and the waiting-to-be-scanned count moves
+    /// fastest of all. Under the table they read where the eye already is, just past the last row, and
+    /// still above the activity console, which is where the reasons for those numbers are printed line
+    /// by line. The strip is the last thing in this view and nothing here is clickable, so it never
+    /// competes with the table for a click that was meant for a row.
+    private var statusStrip: some View {
+        HStack(spacing: 10) {
+            Label("Lots", systemImage: "shippingbox")
+                .font(.subheadline.weight(.semibold))
+                .help("Every lot on the board. A search narrows the table without changing this count.")
+
+            countBadge(lots.count)
+
+            if LotSearch.isFiltering(query) {
+                Text("\(visibleLots.count) of \(lots.count) shown")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .help("How many rows the search is leaving on screen.")
+            }
+
+            if coordinator.unvaluedCount > 0 {
+                Text("\(coordinator.unvaluedCount) waiting to be scanned")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help(
+                        "Rows with no valuation yet — what Price all works on, sold lots included. A "
+                            + "row carrying only a text-only eval still counts as unscanned, because an "
+                            + "eval is a guess rather than an appraisal."
+                    )
+            }
+
+            if !selection.isEmpty {
+                checkedBadge(selection.count)
+            }
+
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, Theme.rowInset + 4)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
     }
 
@@ -278,9 +380,9 @@ struct LotTableView: View {
     ///
     /// A menu of switches rather than a popover, because this is a small, flat set of choices the
     /// operator flips one at a time while wanting to watch the table change behind it — a menu leaves
-    /// the table visible. The fixed chrome — the disclosure chevron and the **Eval** / **Price** /
-    /// **Open** buttons — has no switch here, because it is not a case in `LotColumnKey`: a table
-    /// that cannot price a row is not a table.
+    /// the table visible. The fixed chrome — the row checkboxes, the disclosure chevron and the
+    /// **Eval** / **Price** / **Open** buttons — has no switch here, because it is not a case in
+    /// `LotColumnKey`: a table that cannot price a row is not a table.
     private var columnsMenu: some View {
         Menu {
             Section("Columns") {
@@ -367,6 +469,25 @@ struct LotTableView: View {
             .background(Theme.countFill, in: Capsule())
     }
 
+    /// How many rows are checked, beside the row count.
+    ///
+    /// The two **…selected** buttons name a set and nothing on the toolbar says which one, so this is
+    /// what answers it — and it is tinted like the checkboxes it counts rather than like the plain
+    /// count badge, because it is the same fact in a different place.
+    private func checkedBadge(_ value: Int) -> some View {
+        Label("\(value) checked", systemImage: "checkmark.square.fill")
+            .font(.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 1)
+            .background(Color.accentColor.opacity(0.14), in: Capsule())
+            .help(
+                "Checked lots: what Eval selected and Price selected act on. Click a row's checkbox to "
+                    + "add or drop one, or the box in the table's header to check or clear them all."
+            )
+    }
+
     /// The finder: a lot number from a bid sheet, or any words from the listing copy.
     ///
     /// It is drawn as a field rather than as a bare `TextField` so the toolbar reads as one strip of
@@ -432,12 +553,14 @@ extension LotTableView {
                 policy: policy,
                 isExpanded: isExpanded,
                 isAlternate: isAlternate,
+                isSelected: selection.contains(lot.id),
                 canScan: coordinator.canScan,
                 canPrePrice: coordinator.canPrePrice && !lot.hasValuation,
                 onScan: { coordinator.scan(lot) },
                 onPrePrice: { coordinator.prePrice(lot) },
                 onOpenPage: { pageRequest = $0 },
-                toggle: { toggle(lot) }
+                toggle: { toggle(lot) },
+                onToggleSelect: { selection.toggle(lot.id) }
             )
 
             if isExpanded, !lot.discoveredItems.isEmpty {

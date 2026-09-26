@@ -7,10 +7,11 @@
 //  The single-pass appraisal this replaces asked one question about a whole gallery. That is cheap
 //  and it works, but it asks the model to hold forty frames in its head at once, and the answer is an
 //  average over all of them: a thirty-dollar item in a corner competes with the pallet in front of it
-//  and usually loses. This file is the alternative — one request per photograph, each answer a
-//  `PhotoReading` of exactly what that frame showed, every reading stored on this machine
-//  (`PhotoReadingStore`), and then **one** reconciliation request that turns the readings into the
-//  pallet's line items with the quantities and totals that belong to the whole lot.
+//  and usually loses. This file is the alternative — one request per photograph *view*, meaning one
+//  frame or the frames that showed the same thing (`PhotoFrameGrouping`), each answer a `PhotoReading`
+//  of exactly what that view showed, every reading stored on this machine (`PhotoReadingStore`), and
+//  then **one** reconciliation request that turns the readings into the pallet's line items with the
+//  quantities and totals that belong to the whole lot.
 //
 //  Everything provider-independent lives here. A `ValuationService` supplies two things and nothing
 //  else — how to ask about one photograph, and how to ask for the reconciliation — so both transports
@@ -27,6 +28,12 @@
 //  * **A reconciliation that fails does not lose the scan.** `PhotoReadingMerge` folds the readings
 //    into line items on this machine, so a lot whose *n* photographs were paid for still produces a
 //    valuation when the last request is the one that fails.
+//  * **A frame that shows what another frame showed is read once.** `PhotoFrameGrouping` compares the
+//    frames before anything is requested, so a gallery that lists one photograph twice — or
+//    photographs one carton again — costs one reading rather than three. What is saved is a request,
+//    never a photograph: the folded frame is still attached to the reconciliation (rule 1), and a fold
+//    whose representative turned out unreadable is undone and its frame attached the same way a frame
+//    the ceiling kept out is.
 //
 
 import Foundation
@@ -129,6 +136,14 @@ struct PhotoAggregationRequest: Sendable {
     /// The per-photograph readings, in gallery order.
     var readings: [PhotoReading]
 
+    /// The frames that were not read on their own because another frame showed the same thing
+    /// (`PhotoFrameGrouping`), with the reason and the frame whose reading stands for them.
+    ///
+    /// These frames are attached in `leftoverImages` like any other unread photograph; this is what
+    /// tells the reconciliation that a reading of another frame already covers them, so it neither
+    /// counts their contents twice nor treats them as unexamined.
+    var groupedViews: [PhotoView]
+
     /// Photographs the ceiling kept out of the per-image path, attached so the reconciliation can
     /// still see them. Empty in the default configuration, where every photograph is read on its own.
     var leftoverImages: [LotImage]
@@ -143,16 +158,38 @@ struct PhotoAggregationRequest: Sendable {
 /// The pipeline cannot log — a `ValuationService` is a `Sendable` value with no idea what a console
 /// is — so it reports, and `AnalysisCoordinator` turns these into console lines and into the live
 /// note on the row being scanned.
+///
+/// The three events that name a frame — `.reading`, `.read`, `.failed` — each carry `answered`: how many
+/// of the gallery's frames have an answer in hand at that moment, the frame itself included in the two
+/// that report an outcome. It rides along because the readout *counts* answers rather than following a
+/// frame number, and a frame number is not an order while a few reads are in flight at once (see
+/// `AppraisalStep`). The per-frame wording the console prints is unchanged; this is for the bar.
 enum PhotoScanEvent: Sendable, Equatable {
 
     /// A photograph is about to be read — or was restored from this machine's store instead.
-    case reading(index: Int, of: Int, reused: Bool)
+    case reading(index: Int, of: Int, answered: Int, reused: Bool)
 
     /// A reading landed, with how many product groups it found.
-    case read(index: Int, of: Int, objects: Int)
+    case read(index: Int, of: Int, answered: Int, objects: Int)
 
     /// A photograph could not be read. Never fatal on its own: the rest of the gallery still counts.
-    case failed(index: Int, of: Int, reason: String)
+    case failed(index: Int, of: Int, answered: Int, reason: String)
+
+    /// Two or more frames showed the same thing, so one reading will stand for all of them: the others
+    /// are not read on their own and travel with the reconciliation as images instead.
+    case grouped(PhotoView)
+
+    /// The **manifest route** (`LotManifestPrompt`) found frames that are the same photograph as another
+    /// frame of the gallery, so its batches carry one of them instead of both.
+    ///
+    /// A gallery that lists one photograph twice — which auction layouts do whenever a lot is re-listed,
+    /// or when the same zoom image is served at two addresses — is not two views, and a batch that sent
+    /// it twice would ask the model to reconcile a photograph against itself.
+    ///
+    /// Its own case rather than `grouped` because the two routes do different things with a repeated
+    /// frame: the thorough path reads one frame and carries the other to the reconciliation as an image,
+    /// while the batched path does not send it at all — so the console line has to say which happened.
+    case folded(PhotoView)
 
     /// The reconciliation request is going out.
     case aggregating(photographs: Int, leftovers: Int)
@@ -167,17 +204,66 @@ enum PhotoScanEvent: Sendable, Equatable {
     /// the whole gallery.
     case fallingBack(reason: String)
 
+    /// The **manifest route** (`LotManifestPrompt`) is reading a batch of the pallet's photographs —
+    /// several views in one request — into the inventory. `frames` is how many travel with it, and
+    /// `answered` of `total` is how much of the gallery has an answer behind it so far.
+    ///
+    /// The manifest events ride the same report as the per-photograph ones because they describe the
+    /// same thing from the operator's side: a lot being read, this far into its gallery. What differs is
+    /// the unit — a batch rather than a frame — which is why the console line says so in words while the
+    /// readout counts what both have in common. `answered` rides on this event too, as it does on all
+    /// three frame events, for the same reason: the readout counts answers rather than pointing at the
+    /// work in flight.
+    case manifesting(batch: Int, of: Int, frames: Int, answered: Int, total: Int)
+
+    /// A batch landed: how many items its answer added, and how many of the gallery's frames now have
+    /// an answer behind them (`answered` of `total`, the same count the frame events carry).
+    case manifested(batch: Int, of: Int, items: Int, answered: Int, total: Int)
+
+    /// A batch could not be read. Never fatal on its own — a pallet is still worth appraising from the
+    /// batches that answered — and the console says which batch is missing from the inventory.
+    case manifestFailed(batch: Int, of: Int, answered: Int, total: Int, reason: String)
+
+    /// Every batch has been folded into the pallet's inventory. The manifest travels with the event so
+    /// the console line is the inventory's own account of itself (`PalletManifest.logPhrase`) rather
+    /// than a second rendering of the same numbers that could drift from it.
+    case manifestSettled(PalletManifest)
+
+    /// The batched route produced nothing priceable at all, so the lot falls back to a single pass over
+    /// the whole gallery.
+    ///
+    /// Its own case rather than `fallingBack`, whose wording is about the *thorough* path finding nothing
+    /// readable photograph by photograph: the two routes fail for different reasons, and a console that
+    /// named the wrong one would send the operator to the wrong setting.
+    case fallingBackFromManifest(reason: String)
+
+    /// The manifest is settled and the pricing request is going out — the line-item pass that carries
+    /// the manifest as JSON and no photographs at all.
+    case pricing(items: Int)
+
+    /// One **pricing request** landed, with how many line items its reply produced.
+    ///
+    /// Per request rather than cumulative, because a long inventory is priced in reply-sized pieces
+    /// (`PalletManifest.batches(ofSize:)`: one manifest, one request, as often as not). A single-piece
+    /// inventory therefore prints one line, exactly as it always did, and a warehouse's prints one line
+    /// per twelve items — which is also how the console says the manifest was too long for one reply.
+    case priced(items: Int)
+
     /// The line the console prints for this step, without the lot number.
     var message: String {
         switch self {
-        case .reading(let index, let of, let reused):
+        case .reading(let index, let of, _, let reused):
             reused
                 ? "photograph \(index) of \(of): already read on this machine — reusing it, no request"
                 : "reading photograph \(index) of \(of)"
-        case .read(let index, let of, let objects):
+        case .read(let index, let of, _, let objects):
             "photograph \(index) of \(of) read: \(objects) product group(s)"
-        case .failed(let index, let of, let reason):
+        case .failed(let index, let of, _, let reason):
             "photograph \(index) of \(of) could not be read (\(reason)) — carrying on with the rest"
+        case .grouped(let view):
+            view.logPhrase
+        case .folded(let view):
+            view.batchLogPhrase
         case .aggregating(let photographs, let leftovers):
             leftovers > 0
                 ? "reconciling \(photographs) reading(s) plus \(leftovers) unread photograph(s) into the pallet's line items"
@@ -188,6 +274,25 @@ enum PhotoScanEvent: Sendable, Equatable {
             "the reconciliation request failed (\(reason)) — merging the readings on this machine instead"
         case .fallingBack(let reason):
             "nothing could be read photograph by photograph (\(reason)) — falling back to one pass over the whole gallery"
+        case .manifesting(let batch, let of, let frames, _, _):
+            of > 1
+                ? "manifest batch \(batch) of \(of): reading \(frames) photograph(s) in one request"
+                : "reading \(frames) photograph(s) into the pallet's manifest"
+        case .manifested(let batch, let of, let items, let answered, let total):
+            (of > 1 ? "manifest batch \(batch) of \(of) read" : "manifest read")
+                + ": \(items) item(s), \(answered) of \(total) photograph(s) answered"
+        case .manifestFailed(let batch, let of, let answered, let total, let reason):
+            "manifest batch \(batch) of \(of) could not be read (\(reason)) — carrying on with the rest, "
+                + "\(answered) of \(total) photograph(s) answered"
+        case .manifestSettled(let manifest):
+            "the manifest is settled — \(manifest.logPhrase)"
+        case .fallingBackFromManifest(let reason):
+            "nothing priceable came back from the batches (\(reason)) — falling back to one pass over "
+                + "the whole gallery"
+        case .pricing(let items):
+            "pricing \(items) manifest item(s) in one request, with no photographs attached"
+        case .priced(let items):
+            "the manifest priced into \(items) line item(s)"
         }
     }
 }
@@ -233,6 +338,11 @@ enum LotPhotoScan {
         /// Why the reconciliation had to be done on this machine, when it did.
         var aggregationFailure: String?
 
+        /// The frames that were read as another frame's view instead of on their own, in gallery order
+        /// (`PhotoFrameGrouping`). Empty when no two frames showed the same thing, and holds only views
+        /// whose representative really came back — a fold that had to be undone is not in here.
+        var groupedViews: [PhotoView]
+
         /// `true` when `items` came from `PhotoReadingMerge` rather than from the model.
         var mergedLocally: Bool
     }
@@ -265,7 +375,9 @@ enum LotPhotoScan {
     ///   - store: where readings are remembered between scans.
     ///   - read: how to ask about one photograph — the provider's transport.
     ///   - aggregate: how to ask for the reconciliation — the provider's transport.
-    ///   - report: progress, as it happens. Called from whichever task is doing the work.
+    ///   - report: progress, as it happens. Called from this call's own task rather than from a
+    ///     photograph's task, so the reports arrive in the order the scan learns them and each can carry a
+    ///     count the caller standing behind it can vouch for.
     static func run(
         subject: ValuationSubject,
         description: String,
@@ -289,6 +401,24 @@ enum LotPhotoScan {
         var requests = 0
         var failures: [String] = []
 
+        // Frames with an answer in hand — read, restored from the store, or given up on. What the readout's
+        // bar counts (see `PhotoScanEvent`): a frame number cannot be, because the reads are in flight a
+        // few at a time and land in whatever order the provider answers.
+        var answered = 0
+
+        // 0. Which photographs show the same thing.
+        //
+        // Asked before anything is paid for. Two frames that came back identical — a gallery that
+        // lists one photograph twice, one zoom image served from two addresses, one carton photographed
+        // again with its label turned to the camera — are one reading's worth of work, and folding them
+        // is a claim about the *photographs*, never about the goods: it cannot change what the pallet
+        // holds, only how many times the same content is described. The fold is undone below if the
+        // frame it leans on turns out unreadable.
+        let grouping = await PhotoFrameGrouping.group(images: images, labels: labels, limit: limit)
+        for view in grouping.views {
+            report(PhotoScanReport(lotNumber: lotNumber, event: .grouped(view)))
+        }
+
         // 1. What this machine already knows.
         //
         // Matched by address rather than by position: a gallery that gained a photograph at the front
@@ -305,17 +435,23 @@ enum LotPhotoScan {
                 reading.imageCount = galleryCount
                 slots[slot] = reading
                 reusedIDs.insert(reading.id)
+                answered += 1
                 report(
                     PhotoScanReport(
                         lotNumber: lotNumber,
-                        event: .reading(index: slot + 1, of: galleryCount, reused: true)
+                        event: .reading(index: slot + 1, of: galleryCount, answered: answered, reused: true)
                     )
                 )
             }
         }
 
         // 2. The photographs this machine has not read yet, a few at a time.
-        let pending = (0..<limit).filter { slots[$0] == nil }
+        //
+        // A frame folded into another frame's view is not requested: its content is already on its way
+        // back with that frame's reading.
+        let pending = (0..<limit).filter {
+            slots[$0] == nil && grouping.representative(of: $0 + 1) == nil
+        }
         if !pending.isEmpty {
             let width = min(max(plan.concurrency, 1), pending.count)
 
@@ -334,13 +470,18 @@ enum LotPhotoScan {
                         description: description,
                         localReading: slot < labels.count ? labels[slot] : LotImageEvidence()
                     )
-                    group.addTask {
-                        report(
-                            PhotoScanReport(
-                                lotNumber: lotNumber,
-                                event: .reading(index: slot + 1, of: galleryCount, reused: false)
-                            )
+                    // Announced here, from the loop that launches the read, rather than from inside the
+                    // task: the line is about *this* frame starting, and the answered count is the
+                    // caller's to know. Reported from the task it could land after a later frame's
+                    // reading — the tasks race — and the readout counts these events in the order they
+                    // arrive, which is what makes the bar move forwards.
+                    report(
+                        PhotoScanReport(
+                            lotNumber: lotNumber,
+                            event: .reading(index: slot + 1, of: galleryCount, answered: answered, reused: false)
                         )
+                    )
+                    group.addTask {
                         do {
                             return (slot, .success(try await read(request)))
                         } catch {
@@ -352,6 +493,7 @@ enum LotPhotoScan {
                         requests += 1
                         collect(
                             finished,
+                            answered: &answered,
                             into: &slots,
                             failures: &failures,
                             lotNumber: lotNumber,
@@ -366,6 +508,7 @@ enum LotPhotoScan {
                     requests += 1
                     collect(
                         finished,
+                        answered: &answered,
                         into: &slots,
                         failures: &failures,
                         lotNumber: lotNumber,
@@ -375,6 +518,17 @@ enum LotPhotoScan {
                 }
             }
         }
+
+        // 2b. What the grouping actually saved.
+        //
+        // A view stands for its folds only while the frame it was read from is in hand: a frame folded
+        // into a representative whose read failed has nothing covering it, so the fold is undone and
+        // that frame is treated exactly like a frame a ceiling kept out of the per-image path. Rule 1
+        // from the other side — grouping may remove a request, never a photograph.
+        let filled = Set((0..<limit).filter { slots[$0] != nil }.map { $0 + 1 })
+        let coveredViews = grouping.views.filter { filled.contains($0.representative) }
+        let attachedFolds = Set(coveredViews.flatMap(\.folds).map(\.frame)).subtracting(filled)
+        let groupedViews = coveredViews.compactMap { $0.narrowed(to: attachedFolds) }
 
         // 3. Store what was read, before anything else can fail.
         //
@@ -396,13 +550,20 @@ enum LotPhotoScan {
 
         // 4. One request reconciles the readings into the pallet's line items.
         //
-        // The photographs a ceiling left out travel with it, so a scan never sees less of a lot than
-        // the single-pass appraisal did — it just knows more about some of the frames than others.
-        let leftovers = Array(images.dropFirst(limit))
+        // The photographs a ceiling left out travel with it, and so do the frames whose fold was undone,
+        // so a scan never sees less of a lot than the single-pass appraisal did — it just knows more
+        // about some of the frames than others. `groupedViews` is what tells the reconciliation which
+        // of those attached frames a reading above already covers.
+        let foldedImages = attachedFolds.sorted().compactMap { frame -> LotImage? in
+            let slot = frame - 1
+            return images.indices.contains(slot) ? images[slot] : nil
+        }
+        let leftovers = Array(images.dropFirst(limit)) + foldedImages
         let request = PhotoAggregationRequest(
             subject: subject,
             description: description,
             readings: readings,
+            groupedViews: groupedViews,
             leftoverImages: leftovers,
             evidence: LotImageDigest.merge(labels)
         )
@@ -424,6 +585,7 @@ enum LotPhotoScan {
                     reused: reusedIDs.count,
                     failures: failures,
                     aggregationFailure: nil,
+                    groupedViews: groupedViews,
                     mergedLocally: false
                 )
             )
@@ -442,6 +604,7 @@ enum LotPhotoScan {
                     reused: reusedIDs.count,
                     failures: failures,
                     aggregationFailure: reason,
+                    groupedViews: groupedViews,
                     mergedLocally: true
                 )
             )
@@ -449,8 +612,13 @@ enum LotPhotoScan {
     }
 
     /// Files one finished photograph read in its slot, or notes why it did not land.
+    ///
+    /// `answered` is the caller's running count of frames with an answer in hand, which this owns the
+    /// incrementing of: every frame this files is one more answer, and the count rides on the event so the
+    /// readout advances by it (see `PhotoScanEvent`).
     private static func collect(
         _ finished: (Int, Result<PhotoReading, Error>),
+        answered: inout Int,
         into slots: inout [PhotoReading?],
         failures: inout [String],
         lotNumber: String,
@@ -458,6 +626,7 @@ enum LotPhotoScan {
         report: @Sendable (PhotoScanReport) -> Void
     ) {
         let (slot, result) = finished
+        answered += 1
         switch result {
         case .success(let reading):
             guard slots.indices.contains(slot) else { return }
@@ -465,7 +634,12 @@ enum LotPhotoScan {
             report(
                 PhotoScanReport(
                     lotNumber: lotNumber,
-                    event: .read(index: slot + 1, of: galleryCount, objects: reading.objects.count)
+                    event: .read(
+                        index: slot + 1,
+                        of: galleryCount,
+                        answered: answered,
+                        objects: reading.objects.count
+                    )
                 )
             )
         case .failure(let error):
@@ -474,7 +648,7 @@ enum LotPhotoScan {
             report(
                 PhotoScanReport(
                     lotNumber: lotNumber,
-                    event: .failed(index: slot + 1, of: galleryCount, reason: reason)
+                    event: .failed(index: slot + 1, of: galleryCount, answered: answered, reason: reason)
                 )
             )
         }

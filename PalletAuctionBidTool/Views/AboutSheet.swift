@@ -65,8 +65,9 @@ struct AboutSheet: View {
                     + "Scrape Lots. The app walks the number of result pages set under Tuning and "
                     + "fills the table. Stop cancels the scrape and every scan in flight.",
                 "Appraise what matters: Eval is a cheap text-only guess from a lot's listing copy, "
-                    + "Price is a thorough scan built from its photographs, and Eval all / Price all "
-                    + "do that for every lot with no figure yet."
+                    + "Price is a scan built from its photographs — batched into a manifest and "
+                    + "priced, on DeepSeek; frame by frame and reconciled, on Gemini — and Eval all / "
+                    + "Price all do that for every lot with no figure yet."
             ]
         )
 
@@ -83,8 +84,9 @@ struct AboutSheet: View {
         topic(
             "Tuning a run",
             "The Tuning button holds how far a run walks (Pages), how fast it is allowed to call out "
-                + "(Requests / min, so a metered key is paced rather than refused), how many of a "
-                + "lot's photographs a scan reads one at a time (Photos / scan), and the bid "
+                + "(Requests / min, so a metered key is paced rather than refused), how a lot's "
+                + "photographs are read — in batches of a few frames (Photos / request, DeepSeek) or "
+                + "one at a time (Photos / scan, Gemini) — and the bid "
                 + "percentages and anchor threshold behind the Max bid column and the anchor flags "
                 + "in an expanded row."
         )

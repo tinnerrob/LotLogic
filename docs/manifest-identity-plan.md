@@ -1,7 +1,24 @@
 # Manifest identity & cross-view dedupe — implementation plan
 
-**Status:** approved for implementation. Each tier lands behind a green `xcodebuild` and a green
-`Tools/free-tier-harness/run.sh` before the next begins.
+**Status:** Tier 1 (A–D) is implemented and green — `xcodebuild … CODE_SIGNING_ALLOWED=NO` builds and
+`Tools/free-tier-harness/run.sh` passes with checks 44–46 added. **Tiers 2–4 below are still to do.**
+Each tier lands behind a green build and a green harness run before the next begins.
+
+**What Tier 1 actually came to, against the plan below.** A: the route groups the gallery before it
+batches, and acts only on the fold that cannot cost anything — a frame that is the *same picture*; the
+grouping is asked with the whole gallery as its ceiling, and only `samePicture` folds are left out. That
+needed three things the plan did not name: a `.folded(PhotoView)` console event (a repeated frame here is
+*not* carried anywhere, so `grouped`'s wording would be false), `LotManifestPrompt.runPhrase(_:)` (a
+batch can no longer state a *range* of gallery numbers — it names them as a list), and `ManifestChunk`
+carrying each batch's gallery numbers plus how many frames it answers for, so the readout still reaches the
+gallery. B: `productCodes` intersects barcode-shaped codes first, and `DeepSeekValuationService
+.withLocalCodes(_:labels:positions:)` folds the reader's decodes for the frames an item names into that
+item's identifiers. C: `labelText` on `LotImageEvidence`, filled by `labelLines(in:)`/`labelWording(_:)`
+— the reader's *second* filter, kept narrow so the freight labels and paperwork stay out. D:
+`namesDescribeSameProduct(_:_:)` over `nameTokens(_:)`, with sizes and pack counts canonicalised and
+required to agree. Harness: 44 (the route's picture fold), 45 (the identity questions, unit and end to
+end), 46 (the wording filter and its prompt line). README: deviation 35, and deviations 33/44 rewritten
+where they described the old fold.
 
 ## The problem
 

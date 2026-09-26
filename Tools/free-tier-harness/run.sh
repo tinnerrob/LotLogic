@@ -22,17 +22,21 @@ swiftc -swift-version 6 -o "$out/harness" \
     "$root/PalletAuctionBidTool/Models/ColumnWidths.swift" \
     "$root/PalletAuctionBidTool/Models/ColumnVisibility.swift" \
     "$root/PalletAuctionBidTool/Models/LotSearch.swift" \
+    "$root/PalletAuctionBidTool/Models/LotSelection.swift" \
     "$root/PalletAuctionBidTool/Models/LotSort.swift" \
     "$root/PalletAuctionBidTool/Models/PaginationPlan.swift" \
     "$root/PalletAuctionBidTool/Models/RunProgress.swift" \
+    "$root/PalletAuctionBidTool/Models/PalletManifest.swift" \
     "$root/PalletAuctionBidTool/Models/ScrapeProfile.swift" \
     "$root/PalletAuctionBidTool/Models/ScrapeProfilePresets.swift" \
     "$root/PalletAuctionBidTool/Models/ValuationProvider.swift" \
     "$root/PalletAuctionBidTool/Models/PhotoReading.swift" \
     "$root/PalletAuctionBidTool/Services/LotValuation.swift" \
     "$root/PalletAuctionBidTool/Services/LotImageDigest.swift" \
+    "$root/PalletAuctionBidTool/Services/PhotoFrameGrouping.swift" \
     "$root/PalletAuctionBidTool/Services/LotPhotoScan.swift" \
     "$root/PalletAuctionBidTool/Services/LotPhotoScanPrompt.swift" \
+    "$root/PalletAuctionBidTool/Services/LotManifestPrompt.swift" \
     "$root/PalletAuctionBidTool/Services/PhotoReadingStore.swift" \
     "$root/PalletAuctionBidTool/Services/GeminiValuationService.swift" \
     "$root/PalletAuctionBidTool/Services/DeepSeekValuationService.swift" \

@@ -20,7 +20,7 @@ import Vision
 
 /// What the on-device reader found on one lot's photographs.
 ///
-/// Both lists are literal: no interpretation, no normalisation beyond what is needed to compare two
+/// The lists are literal: no interpretation, no normalisation beyond what is needed to compare two
 /// readings of the same barcode. That is the point — the model is the interpreter, and it is only
 /// useful to it if the digits are the digits that were printed.
 struct LotImageEvidence: Sendable, Hashable {
@@ -36,13 +36,23 @@ struct LotImageEvidence: Sendable, Hashable {
     /// number, or a GTIN printed as digits beside a barcode the reader could not decode.
     var identifiers: [String] = []
 
+    /// The wording the reader could make out on the goods — `Cold Brew Coffee, 12 fl oz` — rather than
+    /// the numbers on it (`labelLines(in:)` decides what counts as wording).
+    ///
+    /// This is the reader's *second* kind of evidence, and the weaker one: it is what two sightings can
+    /// agree on when neither decoded a barcode and the model named them differently, and it is the
+    /// wording the pricing pass can quote back at a marketplace. It is also the noisiest thing on a
+    /// pallet's photographs — freight labels, receipt tape, a courier's paperwork — which is why the
+    /// lines are filtered and capped rather than taken as read.
+    var labelText: [String] = []
+
     /// Photographs the reader could open at all, out of the ones the request carries. A scan whose
     /// gallery is mostly unreadable says so through this number rather than silently reporting none.
     var imagesRead: Int = 0
 
     /// `true` when nothing legible was found — the ordinary case for a pallet of loose household
     /// goods, and not a problem: the model still has the photographs.
-    var isEmpty: Bool { barcodes.isEmpty && identifiers.isEmpty }
+    var isEmpty: Bool { barcodes.isEmpty && identifiers.isEmpty && labelText.isEmpty }
 
     /// What the model is told about the reading, or an empty list when there is nothing to tell.
     var promptLines: [String] {
@@ -73,6 +83,9 @@ struct LotImageEvidence: Sendable, Hashable {
         if !identifiers.isEmpty {
             lines.append("Printed identifiers (model / part / SKU / item numbers): \(identifiers.joined(separator: ", "))")
         }
+        if !labelText.isEmpty {
+            lines.append("Wording read off the packing: \(labelText.joined(separator: " · "))")
+        }
         lines.append(
             "Treat those as already read: match each one to the product it belongs to, call that "
                 + "product by the name the identifier belongs to, and price that exact model and size "
@@ -80,6 +93,13 @@ struct LotImageEvidence: Sendable, Hashable {
                 + "appears above, and do not put a barcode or model number in `evidence` that is not "
                 + "in this list unless you can read it yourself in the photographs."
         )
+        if !labelText.isEmpty {
+            lines.append(
+                "The wording is what the reader could make out of the labelling, not a complete label: "
+                    + "use it to name the product the way the packing names it and to tell two similar "
+                    + "products apart, and treat a word it did not see as unread rather than as absent."
+            )
+        }
         return lines
     }
 
@@ -91,6 +111,14 @@ struct LotImageEvidence: Sendable, Hashable {
         var parts: [String] = []
         if !barcodes.isEmpty { parts.append("barcode(s) \(barcodes.joined(separator: ", "))") }
         if !identifiers.isEmpty { parts.append("identifier(s) \(identifiers.joined(separator: ", "))") }
+        if !labelText.isEmpty {
+            // The first couple of lines rather than all of them: this line goes to the console *and* to
+            // the row while it is being read, and what it is for — the operator seeing what a price was
+            // built on — two lines do as well as six.
+            let shown = labelText.prefix(2).joined(separator: " · ")
+            let rest = labelText.count - min(labelText.count, 2)
+            parts.append("label wording \(shown)" + (rest > 0 ? " (+\(rest) more)" : ""))
+        }
         return parts.joined(separator: " · ")
     }
 }
@@ -127,12 +155,26 @@ enum LotImageDigest {
     /// barcode decoding is a scan for the bars — so once a few identifiers have been read, the rest of
     /// the gallery is the same cartons from another angle and is not worth the time. Barcodes keep
     /// being decoded on every photograph regardless: that half is cheap.
+    ///
+    /// The two things the text pass produces share this budget: a frame whose text was not read has
+    /// neither identifiers to report nor wording (`labelLines(in:)`), which is why the second is
+    /// described as the weaker evidence — where an identifier survives the budget by ending it, a
+    /// wording simply stops arriving.
     static let enoughIdentifiers = 4
 
     /// Cap on each list, so a pallet of shrink-wrapped cartons cannot fill the prompt with label noise
     /// and crowd out the listing text.
     static let maximumBarcodes = 8
     static let maximumIdentifiers = 12
+
+    /// Longest a kept line of label wording may be. A product name and the size printed beside it is
+    /// about this long; past it the line is small print, which says nothing the name above it did not.
+    static let maximumLabelLength = 60
+
+    /// Most lines of label wording kept per photograph. What they are for is that two sightings can
+    /// agree on a *wording* where the model named them differently, and one carton's label does that
+    /// long before the sixth line.
+    static let maximumLabelLines = 6
 
     /// Barcode kinds worth decoding. The linear product codes carry a product identifier, as do the
     /// GS1 2-D kinds; QR is left out on purpose, because on an auction photograph a QR is far more
@@ -189,6 +231,9 @@ enum LotImageDigest {
             for identifier in reading.identifiers {
                 append(identifier, to: &evidence.identifiers, limit: maximumIdentifiers)
             }
+            for wording in reading.labelText {
+                append(wording, to: &evidence.labelText, limit: maximumLabelLines)
+            }
         }
         return evidence
     }
@@ -236,10 +281,75 @@ enum LotImageDigest {
                 append(identifier, to: &readings[index].identifiers, limit: maximumIdentifiers)
                 if readings[index].identifiers.count > before { identifiersSeen += 1 }
             }
+            // The same recognised lines, read the other way round: see `labelLines(in:)`.
+            for wording in labelLines(in: lines) {
+                append(wording, to: &readings[index].labelText, limit: maximumLabelLines)
+            }
         }
 
         return readings
     }
+
+    /// The recognised lines that read like wording printed on the goods, rather than like the paperwork
+    /// a pallet carries.
+    ///
+    /// This is `identifiers(in:)`'s complement, and the second thing the text pass is for. What makes it
+    /// worth having is the case the identifier pass cannot help with: no barcode was decoded off either
+    /// sighting, and the two batches named one product differently — `Cold Brew Coffee, 12 fl oz` on one
+    /// and `Cold Brew 12oz Coffee` on the next — so the *wording* they agree on is what tells the fold
+    /// that they are one product (`ManifestItem.isSameProduct(as:)`).
+    ///
+    /// Kept narrow on purpose. A pallet's photographs are full of freight labels, receipt tape and
+    /// courier paperwork, and handing all of it to the model would spend the prompt on the one thing on
+    /// the pallet that is not for sale, so a line is kept only when it reads like a product: short, made
+    /// mostly of letters, and free of the vocabulary of shipping (`tracking`, `ship to`, a carrier's
+    /// name), of contact details (a URL, an e-mail address, a phone or fax number) and of the auction
+    /// itself (`lot #`, `pallet`). A false positive costs prompt; a false negative costs nothing, because
+    /// the model still has the photographs.
+    ///
+    /// - Parameter lines: recognised text lines, one per line of a label as read.
+    /// - Returns: distinct wordings, in the order they were seen, capped at `maximumLabelLines`.
+    static func labelLines(in lines: [String]) -> [String] {
+        var kept: [String] = []
+        for line in lines {
+            guard let wording = labelWording(line) else { continue }
+            append(wording, to: &kept, limit: maximumLabelLines)
+        }
+        return kept
+    }
+
+    /// One recognised line as a product's own wording, or `nil` when it is not that.
+    ///
+    /// Free of any Vision type, like `identifiers(in:)`, so the rule that decides what counts as
+    /// wording can be checked without an image — which is what the offline harness does.
+    static func labelWording(_ line: String) -> String? {
+        let wording = line.condensedWhitespace
+        guard (4...maximumLabelLength).contains(wording.count) else { return nil }
+
+        // Wording is made of letters, and mostly of them: a line that is half digits is a code, a price or
+        // a measurement — `12 fl oz (355 mL)`, `SKU 4711` — and none of those names a product.
+        let letters = wording.filter(\.isLetter)
+        let digits = wording.filter(\.isNumber)
+        guard letters.count >= 4, letters.count >= 2 * digits.count else { return nil }
+
+        // A phone or fax number is a long run of digits with almost no letters on it.
+        guard !(digits.count >= 7 && letters.count <= 2) else { return nil }
+
+        let lowered = wording.lowercased()
+        guard !lowered.contains("http"), !lowered.contains("www."), !lowered.contains("@") else {
+            return nil
+        }
+        guard !paperworkWords.contains(where: { lowered.contains($0) }) else { return nil }
+        return wording
+    }
+
+    /// Words that belong to the paperwork a pallet travels with rather than to the goods on it.
+    private static let paperworkWords = [
+        "tracking", "ship to", "ship from", "sold to", "bill to", "invoice", "purchase order",
+        "order #", "po #", "carrier", "freight", "address", "phone", "fax", "tel:", "fedex", "usps",
+        "ups ", "dhl", "weight", "dimensions", "qty", "quan", "pallet", "lot #", "serial", "fragile",
+        "this side up", "do not", "customer", "returns"
+    ]
 
     /// The identifier-shaped tokens in a block of recognised text.
     ///

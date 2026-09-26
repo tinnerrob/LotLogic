@@ -264,7 +264,8 @@ struct GeminiValuationService: ValuationService, @unchecked Sendable {
                     readings: scan.readings,
                     readingsFromStore: scan.reused,
                     scanRequests: scan.requests,
-                    reconciliationFailure: scan.aggregationFailure
+                    reconciliationFailure: scan.aggregationFailure,
+                    groupedViews: scan.groupedViews
                 )
             )
         }

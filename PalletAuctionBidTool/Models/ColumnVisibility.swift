@@ -15,9 +15,9 @@
 /// column added in a later version then arrives visible instead of invisible-until-someone-finds-it,
 /// which is how a new column should behave. An empty set — draw everything — is the shipped state.
 ///
-/// The fixed chrome is not in `LotColumnKey` at all, so it can never be hidden: the disclosure
-/// chevron and the **Eval** / **Price** / **Open** buttons are how a lot gets priced and looked at,
-/// and a table without them would have no way to ask for a figure.
+/// The fixed chrome is not in `LotColumnKey` at all, so it can never be hidden: the row checkboxes,
+/// the disclosure chevron and the **Eval** / **Price** / **Open** buttons are how a lot is chosen,
+/// priced and looked at, and a table without them would have no way to ask for a figure.
 struct ColumnVisibility: Equatable, Sendable {
 
     /// The columns the table does not draw. Never all of them: see `set(_:visible:)`.

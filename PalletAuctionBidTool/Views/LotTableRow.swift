@@ -22,6 +22,22 @@ extension LotColumnKey {
     }
 }
 
+/// How a header checkbox is drawn for each amount of checking: an empty box for none, a filled box
+/// with a dash to say "some, and not all", and a filled box with a check for the lot.
+///
+/// The dash is what makes a partly-checked table legible as a *state* rather than as a mismatch: the
+/// filled pair both say "there is a selection here", and the glyph says whether it is finished.
+extension LotSelection.Scope {
+
+    var systemImage: String {
+        switch self {
+        case .none: "square"
+        case .some: "minus.square.fill"
+        case .all: "checkmark.square.fill"
+        }
+    }
+}
+
 /// A fixed-width column cell.
 ///
 /// The width is a *placeholder*, and that is the whole point: a cell is what keeps the header and
@@ -82,9 +98,23 @@ struct LotTableHeader: View {
     let drawn: ColumnWidths
     @Binding var sort: LotSort
     @Binding var direction: SortDirection
+    /// What is checked, as the table owns it. The header reads it for the box's own state and writes
+    /// it through that same box, so the box and the two **…selected** buttons cannot disagree about
+    /// what is checked.
+    @Binding var selection: LotSelection
+    /// The rows the table is *drawing*, in the order it is drawing them — what the box speaks for.
+    ///
+    /// Deliberately not the whole board: a search narrows the table, and a box drawn over the table
+    /// must not reach past what is on screen. It is the same list the sort ordered, so "all" here means
+    /// "all, as the operator sees them stacked".
+    let drawnRowIDs: [UUID]
 
     var body: some View {
         HStack(spacing: 0) {
+            // The checkbox column's own head: the select-all box. Drawn in the same cell the rows'
+            // checkboxes are, from the same constant, so the boxes line up down the table.
+            TableCell(LotColumn.selection) { selectAllBox }
+
             TableCell(LotColumn.expander) { EmptyView() }
 
             // The actions column carries no title under any name — the constant it would carry is
@@ -151,6 +181,50 @@ struct LotTableHeader: View {
         guard isActive(key) else { return "Sort by \(field.label). \(resize)" }
         return "Sorted by \(field.label) (\(direction.label.lowercased())) — click for "
             + "\(direction.toggled.label.lowercased()). \(resize)"
+    }
+
+    /// The box over the rows: all of them checked, some of them, or none.
+    ///
+    /// The glyph is the state; the click is a *direction*, and `LotSelection.Scope` is what decides
+    /// which way it goes — a box that is not fully on fills the table, and one that is empties it. So
+    /// a partly-checked table reads as "not finished yet": an operator who has hand-picked three rows
+    /// and then reaches for the header wants the rows they have not looked at, not an empty table.
+    ///
+    /// Like the rows' own checkboxes it is a glyph in a plain button rather than a `Toggle`, and for
+    /// the same reason: this column is 24 points of chrome, and a `Toggle` would bring a label and a
+    /// layout with it.
+    private var selectAllBox: some View {
+        Button {
+            selection.toggleAll(drawnRowIDs)
+        } label: {
+            Image(systemName: scope.systemImage)
+                .font(.system(size: 12))
+                .foregroundStyle(scope == .none ? Color.secondary : Color.accentColor)
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .disabled(drawnRowIDs.isEmpty)
+        .help(selectAllHelp)
+    }
+
+    /// How much of the drawn table is checked — what the glyph is drawn from and what the click
+    /// direction is read from.
+    private var scope: LotSelection.Scope { selection.scope(of: drawnRowIDs) }
+
+    /// What the box's tooltip says. The same `Scope` that decides the glyph decides the sentence, so
+    /// what the box says it will do and what it does cannot drift apart.
+    private var selectAllHelp: String {
+        let reach = "It counts only the rows the table is showing, so a search narrows what it reaches."
+        switch scope {
+        case .none:
+            return "Check every row in the table (\(drawnRowIDs.count)) — the lots **Eval selected** "
+                + "and **Price selected** then work through. \(reach)"
+        case .some:
+            let checked = drawnRowIDs.count { selection.contains($0) }
+            return "\(checked) of \(drawnRowIDs.count) rows checked — click to check them all. \(reach)"
+        case .all:
+            return "All \(drawnRowIDs.count) rows are checked — click to clear them. \(reach)"
+        }
     }
 
     /// Binds one column's width for the handlebar that drags it.
@@ -259,6 +333,8 @@ struct LotTableRow: View {
     let isExpanded: Bool
     /// Zebra striping: alternating rows carry a whisper of tint so a wide row stays followable.
     let isAlternate: Bool
+    /// `true` when the operator has checked this row — see `LotSelection`.
+    let isSelected: Bool
     /// Whether scanning is possible at all (a provider is configured, no scrape or batch running).
     /// A scan that is already in flight does not block the *other* rows.
     let canScan: Bool
@@ -275,11 +351,19 @@ struct LotTableRow: View {
     /// is built by the row because the row is what knows both — see `pageControl`.
     let onOpenPage: (LotPageRequest) -> Void
     let toggle: () -> Void
+    /// Checks or unchecks this row. The row only reports the click — what a check *means*, and what
+    /// the two **…selected** buttons do with the set, belongs to the table (`LotSelection`).
+    let onToggleSelect: () -> Void
 
     @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 0) {
+            // The checkbox column comes first, outside the chevron: it is the one control here that
+            // acts on the row as a *set* rather than on the row itself, and keeping it at the table's
+            // edge is what lets a column of checks be read down in one glance.
+            TableCell(LotColumn.selection) { selectionControl }
+
             TableCell(LotColumn.expander) {
                 Button(action: toggle) {
                     Image(systemName: "chevron.right")
@@ -375,6 +459,26 @@ struct LotTableRow: View {
     }
 
     // MARK: - Cells
+
+    /// The row's checkbox: the table's own control rather than the row's, which is why its label is a
+    /// bare glyph with no text of its own and its state is read straight from the table's
+    /// `LotSelection`.
+    ///
+    /// Drawn as an SF Symbol inside a plain button instead of as a `Toggle`, because the row already
+    /// treats a click as "expand": a `Toggle` brings its own label, its own layout and its own idea of
+    /// where a click lands, while a button is a 14-point target that owns exactly its own glyph. The
+    /// row's tap gesture stays underneath, so the checkbox is the only part of the row that does not
+    /// expand it.
+    private var selectionControl: some View {
+        Button(action: onToggleSelect) {
+            Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                .font(.system(size: 12))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.plain)
+        .help(isSelected ? "Uncheck lot \(lot.lotNumber)" : "Check lot \(lot.lotNumber)")
+    }
 
     /// The lot number, doubled as the deep link to the lot's page on the auction site.
     ///
@@ -900,16 +1004,20 @@ struct LotDetailRow: View {
                 Label("\(lot.imagesAnalyzed) sent to the model", systemImage: "paperplane")
                 if lot.passesUsed > 1 {
                     Label("\(lot.passesUsed) passes", systemImage: "square.stack.3d.up")
-                        .help("DeepSeek reads the listing text first, then the photographs, and reconciles the two.")
+                        .help(
+                            "How many model requests produced these figures. A batched DeepSeek scan is "
+                                + "one request per batch of photographs plus the one that priced the "
+                                + "manifest; its text-then-photographs route is two."
+                        )
                 }
                 Label("\(lot.itemCount) item(s) discovered", systemImage: "shippingbox")
                 if lot.hasReadings {
                     Label(lot.readingSummary.compactPhrase, systemImage: "photo.stack")
-                        .help(
-                            "Each of these photographs was read on its own and the readings were then "
-                                + "reconciled into the line items above. A figure can be checked "
-                                + "against the frame it came from."
-                        )
+                        .help(readingsSummaryHelp)
+                }
+                if lot.hasManifest {
+                    Label(lot.manifestPhrase, systemImage: "list.bullet.rectangle")
+                        .help(manifestSummaryHelp)
                 }
                 if let request = LotPageRequest(lot: lot) {
                     Button("Open lot page") { onOpenPage(request) }
@@ -923,6 +1031,10 @@ struct LotDetailRow: View {
             if lot.hasReadings {
                 readingsBlock
             }
+
+            if lot.hasManifest {
+                manifestBlock
+            }
         }
         .padding(.leading, Theme.rowInset)
         .padding(.trailing, Theme.rowInset)
@@ -930,6 +1042,37 @@ struct LotDetailRow: View {
         .frame(width: widths.totalWidth, alignment: .leading)
         .background(Color.primary.opacity(0.02))
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.rule.opacity(0.6)).frame(height: 1) }
+    }
+
+    /// What the manifest chip on the card's first line means.
+    ///
+    /// The batched route's counterpart to `readingsSummaryHelp`: there, one request per frame; here, one
+    /// request per *batch* of frames, followed by a single pricing request that carries no photographs at
+    /// all. Worth saying because the chip reads `18 item(s)`, which is the inventory the pallet was
+    /// priced from rather than a count of prices.
+    private var manifestSummaryHelp: String {
+        let count = lot.manifest?.photographCount ?? 0
+        return "The pallet's inventory, read from \(count) of its photographs in batches — each product "
+            + "counted once across every view the batches carried — and then priced in one text-only "
+            + "request. The manifest below is what the line items above were derived from, so a figure "
+            + "that looks wrong can be checked against the entry behind it."
+    }
+
+
+    /// What the readings chip on the card's first line means.
+    ///
+    /// Told two ways because a thorough scan has two shapes now: one request per frame, or one request
+    /// per *view* when two frames turned out to show the same thing — and in the second case the chip's
+    /// count and the gallery's photograph count are honestly different numbers.
+    private var readingsSummaryHelp: String {
+        guard lot.hasGroupedViews else {
+            return "Each of these photographs was read on its own and the readings were then reconciled "
+                + "into the line items above. A figure can be checked against the frame it came from."
+        }
+        return "Each of these photographs was read on its own — except the \(lot.groupedFrameCount) "
+            + "below that showed exactly what another frame showed, which share that frame's reading. "
+            + "The readings were then reconciled into the line items above, so a figure can still be "
+            + "checked against the frame it came from."
     }
 
     /// What each photograph showed, one line per frame — the part of a thorough scan that is *evidence*
@@ -945,6 +1088,21 @@ struct LotDetailRow: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .textSelection(.enabled)
+
+            // The other half of the account: the frames the scan did not pay for, and what covers them.
+            // Printed here rather than hidden, because "12 photographs read" and "9 requests" are both
+            // true of a folded gallery and only together do they explain the count.
+            if lot.hasGroupedViews {
+                Text(lot.groupedViewsPhrase)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .help(
+                        "A frame that showed what another frame showed was not read again: one reading "
+                            + "covers both, and the frame still travels with the reconciliation — "
+                            + "attached, unread — so nothing on the pallet goes unseen."
+                    )
+            }
 
             ForEach(lot.readings.inGalleryOrder) { reading in
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -971,8 +1129,50 @@ struct LotDetailRow: View {
                 }
             }
         }
-        .help("One model request per photograph, kept on this machine and reused by the next scan of "
-            + "this lot with the same model.")
+        .help("One model request per photograph — or per group of frames that showed the same thing — "
+            + "kept on this machine and reused by the next scan of this lot with the same model.")
+    }
+
+    /// What the batches read the pallet to hold — the batched route's evidence, as `readingsBlock` is the
+    /// frame-by-frame route's.
+    ///
+    /// Printed in full rather than summarised: this is the inventory the pricing pass was handed, so a
+    /// line item that looks wrong can be checked against the manifest entry it came from, and the gallery
+    /// numbers each entry names are the photographs that entry rests on. One line per distinct product —
+    /// which is the whole claim the batching makes, that a carton seen from four angles is one line here.
+    private var manifestBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Manifest read from the photographs: \(lot.manifest?.logPhrase ?? "")")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+
+            ForEach(lot.manifest?.items ?? []) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(item.quantity > 0 ? "×\(item.quantity)" : "—")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 32, alignment: .trailing)
+
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(item.displayName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+
+                        if !item.detailPhrase.isEmpty {
+                            Text(item.detailPhrase)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+        }
+        .help("What the photographs were read to hold before any of it was priced — one entry per "
+            + "distinct product, counted once across every view the batches carried, with the frames each "
+            + "was seen in. Pricing looks these entries up; it does not re-count them.")
     }
 }
 
@@ -1071,7 +1271,9 @@ struct FlagBadge: View {
     let valued = sampleValuedLot()
     let prePriced = samplePrePricedLot()
 
-    return VStack(spacing: 0) {
+    // No `return`: the preview body is a result builder, and the bindings above it are declarations
+    // the builder passes over rather than values it is asked to combine.
+    VStack(spacing: 0) {
         LotTableHeader(
             widths: .constant(widths),
             // No column is hidden in this preview, so the stored layout and the drawn one are the
@@ -1079,7 +1281,11 @@ struct FlagBadge: View {
             stored: widths,
             drawn: widths,
             sort: .constant(.scrapeOrder),
-            direction: .constant(.ascending)
+            direction: .constant(.ascending),
+            // One of the two rows below is checked, so the box over them is drawn in its *mixed*
+            // state — the one state a single row's checkbox cannot show on its own.
+            selection: .constant(LotSelection(ids: [valued.id])),
+            drawnRowIDs: [valued.id, prePriced.id]
         )
 
         // A scanned pallet: solid numbers, one $100+ anchor and a Max bid from its resale total.
@@ -1089,12 +1295,14 @@ struct FlagBadge: View {
             policy: policy,
             isExpanded: true,
             isAlternate: false,
+            isSelected: true,
             canScan: true,
             canPrePrice: false,
             onScan: {},
             onPrePrice: {},
             onOpenPage: { _ in },
-            toggle: {}
+            toggle: {},
+            onToggleSelect: {}
         )
         ForEach(valued.discoveredItems) { item in
             DiscoveredItemRow(
@@ -1112,12 +1320,14 @@ struct FlagBadge: View {
             policy: policy,
             isExpanded: true,
             isAlternate: true,
+            isSelected: false,
             canScan: true,
             canPrePrice: true,
             onScan: {},
             onPrePrice: {},
             onOpenPage: { _ in },
-            toggle: {}
+            toggle: {},
+            onToggleSelect: {}
         )
         LotDetailRow(lot: prePriced, widths: widths, onOpenPage: { _ in })
     }

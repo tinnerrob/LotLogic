@@ -126,6 +126,24 @@ final class LotItem: Identifiable {
     /// is the claim an operator checking a figure against a picture is actually checking.
     var readings: [PhotoReading] = []
 
+    /// The frames a thorough scan did not read because they showed what another frame showed
+    /// (`PhotoFrameGrouping`), each naming the frame whose reading stands for it.
+    ///
+    /// The complement of `readings` rather than a duplicate of it: a folded frame has no reading of its
+    /// own, and this is the record that its content is nonetheless accounted for — which is what keeps
+    /// the count of photographs the scan opened from being read as a count of *subjects*.
+    var groupedViews: [PhotoView] = []
+
+    /// The inventory the photographs were read into, when they were read in batches
+    /// (`PalletManifest`, `LotManifestPrompt`). `nil` for every other route — see
+    /// `ValuationOutcome.manifest`.
+    ///
+    /// Kept beside `readings` rather than instead of it because the two are the same kind of thing: an
+    /// account of what the photographs showed. One names the product groups visible in each frame, the
+    /// other names the distinct products the pallet holds and the frames each was seen in, and either
+    /// lets a figure in the line items below be traced back to something on the pallet.
+    var manifest: PalletManifest?
+
     /// The step a thorough scan is on right now: `photograph 7 of 12 read: 4 product group(s)`.
     ///
     /// Set by the coordinator from the scan's own reports (see `PhotoScanReport.rowNote`) so a row
@@ -192,6 +210,30 @@ final class LotItem: Identifiable {
 
     /// `true` once a photograph-by-photograph scan produced readings for this lot.
     var hasReadings: Bool { !readings.isEmpty }
+
+    /// `true` once a scan read two frames as one because they showed the same thing.
+    var hasGroupedViews: Bool { !groupedViews.isEmpty }
+
+    /// `true` once a scan read the gallery in batches and settled an inventory (`PalletManifest`).
+    var hasManifest: Bool { !(manifest?.isEmpty ?? true) }
+
+    /// The inventory's own account of itself — `18 item(s) · 41 unit(s)` — or the empty string when the
+    /// photographs were read some other way.
+    var manifestPhrase: String { manifest?.compactPhrase ?? "" }
+
+    /// How many frames the scan folded into another frame's reading — the requests it did not spend.
+    var groupedFrameCount: Int { groupedViews.reduce(0) { $0 + $1.folds.count } }
+
+    /// `3 frame(s) read once: photograph(s) 4, 7 are the same picture as photograph 2`, one clause per
+    /// view, or the empty string when nothing was folded.
+    ///
+    /// Says what was saved — a request — rather than what was dropped, because nothing was dropped:
+    /// every folded frame still travelled, attached to the reconciliation.
+    var groupedViewsPhrase: String {
+        guard hasGroupedViews else { return "" }
+        return "\(groupedFrameCount) frame(s) read once: "
+            + groupedViews.map(\.phrase).joined(separator: "; ")
+    }
 
     /// The readings rolled up for the row and the console (`12 photo(s) · 34 group(s) · 9 id(s)`).
     var readingSummary: PhotoReadingSummary { readings.photoSummary }
@@ -269,11 +311,21 @@ final class LotItem: Identifiable {
     /// and passes none, which is why it defaults to empty rather than being required. Either way the
     /// live scan note is cleared: the scan is done, so the row must not keep saying "photograph 7 of
     /// 12".
+    ///
+    /// `groupedViews` is the other half of a thorough scan's account of its gallery: the frames that
+    /// were *not* read because another frame showed the same thing. Defaulted for the same reason as
+    /// `readings` — the single-pass path has no frames to fold.
+    ///
+    /// `manifest` is the batched route's account instead (`PalletManifest`): what the pallet was read to
+    /// hold, rather than what each frame showed. Also defaulted, and for the same reason — a route that
+    /// did not batch has no inventory.
     func applyValuation(
         _ items: [DiscoveredItem],
         imagesAnalyzed: Int,
         passes: Int = 1,
-        readings: [PhotoReading] = []
+        readings: [PhotoReading] = [],
+        groupedViews: [PhotoView] = [],
+        manifest: PalletManifest? = nil
     ) {
         discoveredItems = items
         totalRetail = items.reduce(0) { $0 + $1.retailValue }
@@ -281,6 +333,8 @@ final class LotItem: Identifiable {
         self.imagesAnalyzed = imagesAnalyzed
         passesUsed = passes
         self.readings = readings
+        self.groupedViews = groupedViews
+        self.manifest = manifest
         photoScanNote = ""
         analyzedAt = .now
         analysisState = .completed
@@ -351,6 +405,8 @@ final class LotItem: Identifiable {
         imagesAnalyzed = 0
         passesUsed = 0
         readings = []
+        groupedViews = []
+        manifest = nil
         photoScanNote = ""
         analyzedAt = nil
         analysisState = .pending

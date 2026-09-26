@@ -39,6 +39,7 @@ final class AppSettings {
         static let anchorThreshold = "anchorItemThreshold"
         static let hiddenColumns = "hiddenColumns"
         static let photosPerScan = "photosPerScan"
+        static let photosPerRequest = "photosPerRequest"
     }
 
     /// How many lots a batch appraises at the same time.
@@ -73,6 +74,22 @@ final class AppSettings {
 
     /// The counts the **Photos / scan** menu offers, most generous last. `0` is every photograph.
     static let photoScanChoices = [0, 4, 8, 12, 16, 24]
+
+    /// How many of a lot's photographs one **batched** request carries by default: the count the
+    /// DeepSeek route is built from (`AppSettings.photosPerRequest`).
+    ///
+    /// Six is the count that fits both halves of the trade. Several views of the same goods have to be
+    /// *inside one request* for the model to see that the carton at the front and the carton at the side
+    /// are one carton — that is the whole reason to batch rather than read frame by frame — and a batch
+    /// that grows past a dozen frames starts costing as much as the requests it saved without telling
+    /// the model anything new about the pallet.
+    static let defaultPhotosPerRequest = 6
+
+    /// Most one batched request will carry, however the setting is stored.
+    static let maximumPhotosPerRequest = 24
+
+    /// The counts the **Photos / request** menu offers. `0` is **Off** — the per-photograph route.
+    static let photoRequestChoices = [0, 2, 4, 6, 8, 12]
 
     /// Photographs in flight at once, whatever the plan says; see `PhotoScanPlan.concurrency`.
     static let photoScanConcurrency = PhotoScanPlan.defaultConcurrency
@@ -121,6 +138,17 @@ final class AppSettings {
     /// photograph, so this is the ceiling a metered key sets: photographs past it are not dropped —
     /// they travel with the reconciliation request — but they are not read individually either.
     var photosPerScan: Int
+
+    /// How many of a lot's photographs one **batched** request carries, or `0` for **Off** — read the
+    /// gallery one frame at a time instead.
+    ///
+    /// The DeepSeek route's own setting (`DeepSeekValuationService.photosPerRequest`), and the one that
+    /// trades requests against context: a batch of six frames answers a whole pallet in a couple of
+    /// requests where reading frame by frame would spend one per photograph, and because the frames
+    /// travel together the model can see that the carton at the front and the carton at the side are one
+    /// carton rather than reconciling two reports afterwards. Gemini reads a gallery frame by frame and
+    /// ignores this — see `batchesPhotographs`.
+    var photosPerRequest: Int
 
     /// Percent of resale worth bidding on a High-confidence valuation.
     var highBidPercent: Int
@@ -173,6 +201,15 @@ final class AppSettings {
                 Self.maximumPhotosPerScan
             )
         )
+        // Same object-for-an-integer read, for the same reason: **Off** (`0`) is a deliberate choice
+        // about how a gallery is read, not an unset field.
+        photosPerRequest = max(
+            0,
+            min(
+                defaults.object(forKey: Key.photosPerRequest) as? Int ?? Self.defaultPhotosPerRequest,
+                Self.maximumPhotosPerRequest
+            )
+        )
         // Read every numeric as an object so a deliberate value (including 0) survives a relaunch
         // instead of being mistaken for "never configured"; nil falls back to the shipped policy.
         let defaultPolicy = BidTargetPolicy.standard
@@ -207,8 +244,19 @@ final class AppSettings {
     /// Photographs per scan clamped into what the pipeline can honour.
     var effectivePhotosPerScan: Int { max(0, min(photosPerScan, Self.maximumPhotosPerScan)) }
 
+    /// Photographs per **batch** clamped into what one request can honour.
+    var effectivePhotosPerRequest: Int { max(0, min(photosPerRequest, Self.maximumPhotosPerRequest)) }
+
     /// `true` while a scan reads **every** photograph of a lot one at a time, which is the default.
     var readsEveryPhotograph: Bool { effectivePhotosPerScan <= 0 }
+
+    /// `true` while a lot's photographs are read in **batches** rather than one at a time.
+    ///
+    /// Two things have to agree for that: the operator has to have set a batch width, *and* the selected
+    /// provider has to be the one that batches. Gemini reads a gallery frame by frame — its whole design
+    /// is one question per photograph — so the setting is inert there rather than a second silent route,
+    /// and a run cannot end up batching on the transport that has no manifest pass to batch into.
+    var batchesPhotographs: Bool { provider == .deepSeek && effectivePhotosPerRequest > 0 }
 
     /// The photograph budget in words, for the run log and the status line.
     var photoScanSummary: String {
@@ -217,13 +265,32 @@ final class AppSettings {
             : "the first \(effectivePhotosPerScan) photograph(s)"
     }
 
+    /// The route in words, for the run log and the status line.
+    ///
+    /// A noun phrase, because that is how the log uses it — `Scanning lot 142 — DeepSeek
+    /// deepseek-flash, photographs in batches of 6 on its lot page`. Says batching when it is on and the
+    /// per-photograph budget when it is not, so the line an operator reads before spending anything
+    /// describes what the run will actually do.
+    var photoRouteSummary: String {
+        batchesPhotographs
+            ? "photographs in batches of \(effectivePhotosPerRequest)"
+            : "\(photoScanSummary) read one at a time"
+    }
+
     /// The thorough-scan plan the selected provider is built with.
     ///
     /// One place builds it, so the model it names, the ceiling it applies and the store it consults
     /// are the same for both transports — which is what makes "the reading was reused" mean the same
     /// thing whichever key paid for it.
+    ///
+    /// The batched route *displaces* it rather than running beside it: DeepSeek's manifest batches and
+    /// the per-photograph scan are two ways of reading the same gallery, and a run that did both would
+    /// pay twice for the photographs. So while batching is on, this plan is `.disabled` — and the
+    /// DeepSeek service's own `photosPerRequest` is what it runs instead. Nothing else in the app has to
+    /// know which route was chosen.
     func photoScanPlan() -> PhotoScanPlan {
-        .thorough(
+        guard !batchesPhotographs else { return .disabled }
+        return .thorough(
             modelID: activeModelID,
             perImageLimit: effectivePhotosPerScan,
             concurrency: Self.photoScanConcurrency
@@ -343,6 +410,7 @@ final class AppSettings {
         defaults.set(pageLimit, forKey: Key.pageLimit)
         defaults.set(requestsPerMinute, forKey: Key.requestsPerMinute)
         defaults.set(photosPerScan, forKey: Key.photosPerScan)
+        defaults.set(photosPerRequest, forKey: Key.photosPerRequest)
         defaults.set(highBidPercent, forKey: Key.highBidPercent)
         defaults.set(mediumBidPercent, forKey: Key.mediumBidPercent)
         defaults.set(lowBidPercent, forKey: Key.lowBidPercent)
@@ -371,6 +439,7 @@ final class AppSettings {
         pageLimit = ScrapeLimits.defaultPages
         requestsPerMinute = Self.defaultRequestsPerMinute
         photosPerScan = Self.defaultPhotosPerScan
+        photosPerRequest = Self.defaultPhotosPerRequest
         highBidPercent = BidTargetPolicy.standard.highConfidencePercent
         mediumBidPercent = BidTargetPolicy.standard.mediumConfidencePercent
         lowBidPercent = BidTargetPolicy.standard.lowConfidencePercent

@@ -138,6 +138,23 @@ struct ValuationOutcome: Sendable {
     /// Why the reconciliation had to be done on this machine, when it did — the readings were folded
     /// into line items by `PhotoReadingMerge` rather than by the model.
     var reconciliationFailure: String?
+
+    /// The frames the thorough scan did *not* read because they showed what another frame showed
+    /// (`PhotoFrameGrouping`), each naming the frame whose reading stands for it. Empty on the
+    /// single-pass path, and empty for a gallery whose frames were all different — so a non-empty value
+    /// here is exactly "fewer requests than photographs, and here is why".
+    var groupedViews: [PhotoView] = []
+
+    /// What the photographs were read to hold, on the route that reads them in batches
+    /// (`LotManifestPrompt`, `PalletManifest`). `nil` for every other route, because none of them has an
+    /// inventory to show: a single-pass appraisal goes straight from pixels to prices, and the
+    /// photograph-by-photograph path keeps its account per frame instead (`readings`).
+    ///
+    /// Carried for the same reason `readings` is: it is *evidence*. A priced line item says what the
+    /// pallet is worth; the manifest says which products the photographs were read to contain, with the
+    /// gallery numbers each was seen in — so a figure that looks wrong can be traced to the item it was
+    /// priced from without spending another request.
+    var manifest: PalletManifest?
 }
 
 /// Whole-pallet figures guessed from the listing text alone.
@@ -446,6 +463,39 @@ enum LotImageLoader {
             download.images.append(image)
         }
         return download
+    }
+
+    /// Splits a downloaded gallery into the batches one request each will carry.
+    ///
+    /// Written for the manifest route (`LotManifestPrompt`), which sends a *batch* of a pallet's
+    /// photographs per request: `width` is how many frames, and `perRequestBytes` is the inline budget
+    /// the batch must still fit — the same ceiling `download(_:maxBytes:totalBytes:session:)` applies to
+    /// a whole request's images, because a batch *is* a request. Frames are taken in gallery order.
+    ///
+    /// A batch is never empty, so a single image larger than `perRequestBytes` travels alone rather than
+    /// stalling the walk: `maxBytes` in the download step is what keeps that from happening in practice
+    /// (a frame that was downloaded is by definition inside a request's budget).
+    ///
+    /// - Returns: the batches, in gallery order, each at most `width` frames and inside
+    ///   `perRequestBytes` of image bytes.
+    static func batches(of images: [LotImage], width: Int, perRequestBytes: Int) -> [[LotImage]] {
+        let limit = max(1, width)
+        var batches: [[LotImage]] = []
+        var current: [LotImage] = []
+        var used = 0
+
+        for image in images {
+            let overflows = used + image.byteCount > perRequestBytes
+            if !current.isEmpty, current.count >= limit || overflows {
+                batches.append(current)
+                current = []
+                used = 0
+            }
+            current.append(image)
+            used += image.byteCount
+        }
+        if !current.isEmpty { batches.append(current) }
+        return batches
     }
 
     /// Fetches a single image and turns it into an inline-able candidate.

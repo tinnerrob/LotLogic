@@ -109,9 +109,10 @@ enum LotPhotoScanPrompt {
     /// every pass shares — which is why this instruction supplies exactly two rules of its own before
     /// interpolating them.
     static let aggregationSystemInstruction = """
-    You are finishing a liquidation-auction valuation. Every photograph of one pallet has already \
-    been read on its own, and each reading lists the product groups visible in that single frame. \
-    Reconcile those readings into the pallet's line items and price them.
+    You are finishing a liquidation-auction valuation. The pallet's photographs have already been \
+    read — one reading per frame, or one reading standing for the frames that showed the same thing — \
+    and each reading lists the product groups visible in a single view of the pallet. Reconcile those \
+    readings into the pallet's line items and price them.
 
     Rules:
     1. The readings are views of ONE pallet, so the same goods appear in several of them — another \
@@ -165,6 +166,14 @@ enum LotPhotoScanPrompt {
                 "\(rendered.omitted) further reading(s) did not fit this prompt and are not shown. "
                     + "Where that leaves a product's quantity uncertain, say so in `notes`."
             )
+        }
+        if !request.groupedViews.isEmpty {
+            lines.append(
+                "Some photographs showed what another photograph showed, so they were not read on their "
+                    + "own: one reading stands for them, and the photographs themselves are attached "
+                    + "below. What each of them shares with the frame it matches:"
+            )
+            lines.append(contentsOf: request.groupedViews.flatMap(\.promptNotes))
         }
         let repeated = PhotoReadingMerge.repeatedPhrases(from: request.readings)
         if !repeated.isEmpty {
