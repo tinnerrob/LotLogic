@@ -729,6 +729,14 @@ enum LotValuationAnswer {
 /// The prompt and output contract shared by both providers.
 enum LotValuationPrompt {
 
+    /// The sampling temperature every pass is sent at, **except** the manifest batch: a valuation is an
+    /// opinion about goods, and two runs over the same photographs may reasonably word it differently or
+    /// notice different things, which is latitude worth having. It is named here rather than written as
+    /// `0.2` in each transport so the one request that must *not* have the latitude can point at what it
+    /// is the exception to — `LotManifestPrompt.manifestTemperature`, which the batched pass sends (and
+    /// Gemini's will, when that transport grows one).
+    static let standardTemperature = 0.2
+
     /// Pricing and formatting rules every pass shares, so the text pass and the photograph pass
     /// cannot drift apart.
     ///

@@ -470,7 +470,7 @@ extension GeminiValuationService {
             ),
             contents: [GenerateContentRequest.Content(role: "user", parts: parts)],
             generationConfig: GenerateContentRequest.GenerationConfig(
-                temperature: 0.2,
+                temperature: LotValuationPrompt.standardTemperature,
                 responseMimeType: "application/json",
                 responseSchema: LotValuationPrompt.itemsSchema
             )
@@ -494,7 +494,7 @@ extension GeminiValuationService {
                 )
             ],
             generationConfig: GenerateContentRequest.GenerationConfig(
-                temperature: 0.2,
+                temperature: LotValuationPrompt.standardTemperature,
                 responseMimeType: "application/json",
                 responseSchema: LotValuationPrompt.prePriceSchema
             )
@@ -522,7 +522,7 @@ extension GeminiValuationService {
                 )
             ],
             generationConfig: GenerateContentRequest.GenerationConfig(
-                temperature: 0.2,
+                temperature: LotValuationPrompt.standardTemperature,
                 responseMimeType: "application/json",
                 responseSchema: LotPhotoScanPrompt.readingSchema
             )
@@ -547,7 +547,7 @@ extension GeminiValuationService {
             ),
             contents: [GenerateContentRequest.Content(role: "user", parts: parts)],
             generationConfig: GenerateContentRequest.GenerationConfig(
-                temperature: 0.2,
+                temperature: LotValuationPrompt.standardTemperature,
                 responseMimeType: "application/json",
                 responseSchema: LotValuationPrompt.itemsSchema
             )

@@ -28,6 +28,16 @@ import Foundation
 /// The prompts and output contracts for the manifest route (`PalletManifest`).
 enum LotManifestPrompt {
 
+    /// The sampling temperature a **manifest batch** is sent at: **zero**.
+    ///
+    /// Every other pass samples at `LotValuationPrompt.standardTemperature`, because a valuation is an
+    /// opinion and two runs over one pallet may reasonably differ in wording or in what they notice.
+    /// This pass is not an opinion: it is an extraction — which products are visible in these frames,
+    /// and how many — and its answer is folded into a pallet-wide inventory that is then priced and bid
+    /// on. The same pallet read twice must not come back with two different counts, so the batch is
+    /// asked the one question there is an answer to, and asked for it the same way every time.
+    static let manifestTemperature = 0.0
+
     /// Ground rules for reading a **batch** of one pallet's photographs into a manifest.
     ///
     /// The batch is what makes the deduplication possible: several views of the same goods travel in
@@ -35,7 +45,10 @@ enum LotManifestPrompt {
     /// carton inside one context rather than reconciled afterwards from two reports that each knew
     /// only their own frame. Nothing here asks what anything is worth — pricing is the next pass's
     /// whole job (`pricingSystemInstruction`) — so these rules spend themselves on identity, count and
-    /// legibility, and on the one mistake a batch invites: counting a product once per view.
+    /// legibility, and on the two mistakes a batch invites: counting a product once per view (rule 1,
+    /// and the cue list in rule 2 that decides whether two sightings are one product), and answering
+    /// about some of the frames it was handed and not the rest (rule 8, which makes every photograph
+    /// the batch's business either through an item's `views` or through `unreadPhotos`).
     static let manifestSystemInstruction = """
     You are cataloguing ONE liquidation-auction pallet from a batch of its photographs. The batch \
     holds several views of the same goods — a carton at the front, the same carton from the side, a \
@@ -48,34 +61,54 @@ enum LotManifestPrompt {
     side, the pallet holds one case and not two. Never add together quantities that more than one \
     photograph reports — count a product the largest number of times a single view supports it, and \
     raise that only when the views genuinely show separate stacks.
-    2. Read the goods before you judge them, and read them closely. Goods may be shrink-wrapped, \
+    2. Judge "one product or two" by what the views agree on, strongest cue first: the same barcode \
+    digits; the same model, part or SKU number; the same brand with the same product line and pack \
+    count; the same wording on the label; the same size, weight or printed count; the same kind of \
+    goods in the same place in the stack with the same neighbours around it; and the same damage, \
+    repacking or price sticker. One cue agreeing is enough to call it ONE product. A disagreement \
+    where it counts — a different model number, a different pack count or printed size, a different \
+    product line on the label — means TWO products, however alike the two views look otherwise.
+    3. When the cues do not settle it, return ONE entry and say what is uncertain in its `notes`: one \
+    entry with a note beats two entries. A duplicate the operator can see and merge costs a glance; a \
+    phantom second product is counted, priced and bid on as though the pallet really held two. Two \
+    sides of one 24-pack of batteries — the label wording in one frame, the pack count and the barcode \
+    in another — is ONE entry ("Energizer MAX AA alkaline batteries, 24-pack", quantity 1) naming both \
+    frames in `views`, not two entries, and not a count of 2.
+    4. Read the goods before you judge them, and read them closely. Goods may be shrink-wrapped, \
     stacked, in open boxes or half hidden, and a partly legible label is still worth reading: report \
     what you could make out. Brand and product names, model and part numbers, the digits printed \
     under a barcode (UPC/EAN/GTIN), size, weight and count wording, case codes, condition wording and \
     any price sticker are all evidence — copy them into the fields below exactly as printed.
-    3. `itemName` names the exact product you identified: brand, product line, size and pack count as \
+    5. `itemName` names the exact product you identified: brand, product line, size and pack count as \
     the label gives them, for example "Energizer MAX AA alkaline batteries, 24-pack". Group identical \
     or near-identical goods into ONE entry rather than one entry per unit, and leave the name at the \
     category only when nothing more specific could be read.
-    4. `quantity` is how many units of that product this batch supports. Do not extrapolate to the \
+    6. `quantity` is how many units of that product this batch supports. Do not extrapolate to the \
     rest of the pallet: other batches are read separately, and the pallet's own count is settled \
     later, from every batch together. A sealed case whose own label says "12" is 12 when the case is \
     the thing being sold, and 1 when it is one case in a stack of cases.
-    5. `views` lists the 1-based gallery numbers of the photographs you saw this item in, taken from \
-    the numbering given in the question. A product you saw in three frames lists three numbers.
-    6. When the app's own text and barcode reader has already reported what it read, treat that as \
+    7. `views` lists the 1-based gallery numbers of the photographs you saw this item in, taken from \
+    the numbering given in the question. It is required, and it is the batch's evidence that the item \
+    was really there: a product you saw in three frames lists three numbers.
+    8. Every attached photograph must be accounted for: it appears in the `views` of at least one \
+    item, or its gallery number is listed in `unreadPhotos` because it shows nothing sellable — the \
+    pallet's own side, the floor, an empty shelf, a shipping label and nothing else. Never both for \
+    one frame: a photograph an item was seen in is not unread. Use an empty `unreadPhotos` list when \
+    every frame in the batch held something, and never leave a frame unmentioned.
+    9. When the app's own text and barcode reader has already reported what it read, treat that as \
     verified: it is the digits a camera can misread and a decoder cannot. Match each entry to the \
     product it belongs to, and never contradict a decoded barcode by naming a different product. Do \
     not assume a barcode stapled to the outside of a pallet belongs to the goods inside — a freight \
     or tracking label is not a product identifier.
-    7. Never invent an item or an identifier: a model number or barcode you quote must be one you can \
+    10. Never invent an item or an identifier: a model number or barcode you quote must be one you can \
     read in a photograph or one the reader listed. Use an empty string or an empty list for anything \
     you could not read rather than a guess.
-    8. `confidence` must be exactly one of: High, Med, Low. Use High when something legible on the \
+    11. `confidence` must be exactly one of: High, Med, Low. Use High when something legible on the \
     goods — a label, a model number, a barcode — identifies the product; Med for a reasonable \
     inference from partial clues; Low for speculation.
-    9. An empty `manifest` is the honest answer for a batch that shows nothing sellable — the pallet's \
-    side, the floor, a shipping label and nothing else — but a photograph of goods is never that.
+    12. An empty `manifest` is the honest answer for a batch that shows nothing sellable — the pallet's \
+    side, the floor, a shipping label and nothing else — but a photograph of goods is never that. \
+    Name the frames that made it empty in `unreadPhotos`.
     """
 
     /// The batch question: the listing text, which frames of the gallery travel with this request, and
@@ -114,6 +147,10 @@ enum LotManifestPrompt {
         lines.append(
             "Anything shown in more than one of them is ONE item, and a product you saw in an earlier "
                 + "batch is named again at most — never counted again from a different angle."
+        )
+        lines.append(
+            "Account for every photograph attached: either it appears in some item's `views`, or it is "
+                + "listed in `unreadPhotos` because it shows nothing sellable."
         )
         lines.append(contentsOf: LotValuationPrompt.outputContractLines(schemaText: schemaText))
         return lines.joined(separator: "\n")
@@ -159,6 +196,15 @@ enum LotManifestPrompt {
     /// pricing pass looks the product up by, and `views`, which keeps the gallery numbering attached to
     /// the goods. Asking for money here would invite the model to price a product it has not finished
     /// identifying, which is the mistake the two-pass split exists to avoid.
+    ///
+    /// `views` is **required** on a line, because a line with no photograph behind it is a line the
+    /// model invented, and identity is this pass's entire job. `unreadPhotos` is asked for at the top
+    /// level — the other half of that contract: a frame is either named by an item or declared
+    /// goods-free, so a batch cannot quietly answer about some of what it was handed — but it is left
+    /// out of `required`, because a provider that enforces the schema strictly
+    /// (`GeminiValuationService`, whose `responseSchema` this same value will be) would fail a whole
+    /// batch over an accounting list, and because JSON mode is advisory anyway: the prompt insists on
+    /// it and the decode tolerates its absence (`LotManifestAnswer.answer(fromAnswerText:finishReason:)`).
     static var manifestSchema: ResponseSchemaNode {
         .object(
             description: "The distinct products a batch of one auction pallet's photographs shows.",
@@ -170,8 +216,15 @@ enum LotManifestPrompt {
                         items: .object(
                             description: "One product, counted once across every view in this batch.",
                             properties: manifestItemProperties,
-                            required: ["itemName", "quantity", "confidence"]
+                            required: ["itemName", "quantity", "confidence", "views"]
                         )
+                    )
+                ),
+                (
+                    "unreadPhotos",
+                    .array(
+                        description: "Gallery numbers (1-based) of this batch's photographs that show no sellable goods. Empty when every frame held something.",
+                        items: .number(description: "Gallery position of one photograph.")
                     )
                 )
             ],
@@ -386,6 +439,44 @@ struct ManifestPayload: Codable {
     }
 
     var manifest: [Item]?
+
+    /// Gallery numbers of this batch's photographs that show nothing sellable.
+    ///
+    /// Read as `Double` for the same reason `views` is, and optional because a batch that answers in
+    /// JSON mode can leave the key out — an answer that names its goods but never mentions the frames
+    /// it found empty is *reported* by the route rather than rejected here
+    /// (`ManifestBatchAnswer.unaccountedFrames(among:)`).
+    var unreadPhotos: [Double]?
+}
+
+/// One batch's answer, decoded: the items it read and the frames it declared goods-free.
+///
+/// The two halves are what the batch contract asks of every attached photograph — it is named in some
+/// item's `views`, or it is listed in `unreadPhotos` — so this is the unit the route folds
+/// (`PalletManifest.absorb(_:)`) and the unit that can be asked what it accounted for.
+struct ManifestBatchAnswer: Sendable {
+
+    /// The distinct products the batch read, in the order it listed them.
+    var items: [ManifestItem] = []
+
+    /// Gallery numbers the batch read and found nothing sellable in, in gallery order and once each.
+    var unreadPhotos: [Int] = []
+
+    /// The frames of a batch this answer accounts for neither by naming them in an item's `views` nor
+    /// by declaring them in `unreadPhotos`.
+    ///
+    /// Named rather than resolved: a frame in no list is a frame the model looked at and said nothing
+    /// about — the inventory may be short the product it showed — whereas a frame it *did* name is
+    /// accounted for however the two lists disagree about it. What the caller does with the difference
+    /// is the caller's business; the contract it is measured against is stated here.
+    ///
+    /// - Parameter positions: the gallery numbers of the frames that travelled with the batch, in
+    ///   gallery order, which is what the batch was told to answer about.
+    func unaccountedFrames(among positions: [Int]) -> [Int] {
+        let named = Set(items.flatMap(\.views))
+        let declared = Set(unreadPhotos)
+        return positions.filter { !named.contains($0) && !declared.contains($0) }
+    }
 }
 
 /// Turns one batch's answer into manifest items.
@@ -403,7 +494,12 @@ enum LotManifestAnswer {
     /// batch that was read, and the honest answer for it is no items. This throws only when the answer
     /// carried no manifest at all — and the *route* is what decides that a pallet whose every batch came
     /// back empty needs its gallery pass instead (see `DeepSeekValuationService.value(subject:)`).
-    static func items(fromAnswerText text: String, finishReason: String?) throws -> [ManifestItem] {
+    ///
+    /// `unreadPhotos` is read when it is there and reads as an empty list when it is not, because the
+    /// key is the batch's *accounting* rather than its findings: an answer that named its goods has
+    /// told the app what the frames held, and a missing list is a hole the route reports rather than a
+    /// reason to throw an inventory away.
+    static func answer(fromAnswerText text: String, finishReason: String?) throws -> ManifestBatchAnswer {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ValuationError.noContent(finishReason: finishReason)
         }
@@ -420,7 +516,10 @@ enum LotManifestAnswer {
         guard let reported = payload.manifest else {
             throw ValuationError.malformedResponse("the answer carried no manifest key")
         }
-        return reported.compactMap(item(from:))
+        return ManifestBatchAnswer(
+            items: reported.compactMap(item(from:)),
+            unreadPhotos: positions(from: payload.unreadPhotos)
+        )
     }
 
     /// Normalises one reported line, or drops it when it names nothing at all.
@@ -443,16 +542,18 @@ enum LotManifestAnswer {
             identifiers: LotPhotoScanAnswer.identifiers(from: reported.identifiers),
             labelText: (reported.labelText ?? "").condensedWhitespace.truncated(to: maximumLabelLength),
             confidence: DiscoveredItem.Confidence(rawText: reported.confidence ?? "").rawValue,
-            views: views(from: reported.views),
+            views: positions(from: reported.views),
             notes: (reported.notes ?? "").condensedWhitespace.truncated(to: maximumProseLength)
         )
     }
 
-    /// Distinct, positive gallery positions, in order.
+    /// Distinct, positive gallery positions, in order — the reading both `views` and `unreadPhotos` are
+    /// held to, since they answer in the same numbering.
     ///
     /// Clamped rather than rejected, like the count: a `views` list naming photograph 0 or 900 is the
-    /// model slipping, and the item's identity is worth more than the slip.
-    static func views(from raw: [Double]?) -> [Int] {
+    /// model slipping, and the item's identity is worth more than the slip. The same applies to a frame
+    /// declared unread, which is why one function serves both rather than two that could drift.
+    static func positions(from raw: [Double]?) -> [Int] {
         var positions: [Int] = []
         for entry in raw ?? [] {
             guard entry.isFinite else { continue }

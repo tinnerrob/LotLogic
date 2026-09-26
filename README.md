@@ -29,8 +29,9 @@ hammer falls, whether a lot is worth bidding on.
   setting — and **Open** puts that same page in a window over the table, for the photographs and the fine
   print nothing has to pay for. A **Price** is one of two shapes. On DeepSeek it is a **batched scan**:
   the gallery travels a few frames at a time, each batch is read into a *manifest* of what the pallet
-  holds — one entry per distinct product, counted once across every view that batch carried
-  (`PalletManifest`) — and the manifest is then priced in text-only requests: one per dozen inventory
+  holds — one entry per distinct product, counted once across every view that batch carried, with every
+  frame in the batch either named by an entry or reported as holding nothing (`PalletManifest`) — and the
+  manifest is then priced in text-only requests: one per dozen inventory
   lines, so ordinarily one. A twelve-photograph lot costs three requests instead of thirteen, and a
   carton seen from two angles is recognised as one carton rather than reconciled afterwards
   (`LotManifestPrompt`, **Photos / request** in Run Tuning). Gemini reads the gallery **photograph by
@@ -179,7 +180,7 @@ PalletAuctionBidTool/
 │   │                                is built from, plus its roll-up (`PhotoReadingSummary`)
 │   ├── PalletManifest.swift         What a pallet's photographs were read to hold — the unit the batched
 │   │                                route is built from, with the cross-batch fold that counts a
-│   │                                product once (UI-free)
+│   │                                product once and keeps the frames the batches found empty (UI-free)
 │   ├── Formatting.swift             Currency / percent / geometry formatting helpers
 │   ├── ScrapeProfile.swift          Declarative selector strategy (data, not code)
 │   ├── ScrapeProfilePresets.swift   `ScrapeProfile.genericBase()` — the default strategy
@@ -209,8 +210,9 @@ PalletAuctionBidTool/
 │   ├── LotPhotoScanPrompt.swift     The per-photograph and reconciliation prompts, the reading
 │   │                                schema and its tolerant decode (`LotPhotoScanAnswer`)
 │   ├── LotManifestPrompt.swift      The batched pipeline's two questions — what a batch shows, and what
-│   │                                that inventory is worth — with the manifest schema/decode and the
-│   │                                pricing pass's reuse of the line-item schema
+│   │                                that inventory is worth — with the manifest schema and decode
+│   │                                (`views` required, every frame accounted for) and the pricing
+│   │                                pass's reuse of the line-item schema
 │   ├── PhotoReadingStore.swift      Readings kept on disk, keyed by lot + model + prompt version
 │   ├── GeminiValuationService.swift REST v1beta `:generateContent` client (schema-constrained)
 │   └── DeepSeekValuationService.swift OpenAI-compatible `/chat/completions` client (json_object;
@@ -471,7 +473,16 @@ which route produced a figure.
    those frames show, each counted once *across the views in the batch* — the carton at the front and
    the same carton at the side are one entry because one request saw both — with brand, model number,
    printed identifiers, condition, the count the batch supports, and the gallery numbers each was seen
-   in. No prices are asked for here: identity is the job.
+   in. No prices are asked for here: identity is the job. The batch is told which cues settle *one
+   product or two* — the same barcode digits, the same model or part number, the same brand with the
+   same pack count, the same wording on the label, the same printed size, the same place in the stack
+   with the same neighbours, the same damage — and that where those do not settle it, one entry with a
+   note beats two entries (a worked example of two sides of one 24-pack is in the prompt). It is also
+   asked to **account for every frame it was handed**: each photograph appears in some entry's `views`,
+   or in `unreadPhotos` as a frame holding nothing sellable. And it is asked *cold* — `temperature: 0`
+   (`LotManifestPrompt.manifestTemperature`), where every other pass in the app samples at 0.2 —
+   because this pass is an extraction rather than an opinion, and the same pallet read twice has to be
+   counted the same twice.
 4. **The batches are folded into one inventory** (`PalletManifest.absorb(_:)`), in gallery order
    however the requests landed. A product the batches agree on is one line, and *agree* is decided by the
    strongest evidence there is (`ManifestItem.isSameProduct(as:)`, deviation 35): a barcode both batches
@@ -481,9 +492,16 @@ which route produced a figure.
    the sum — two angles are not more goods), the more complete reading of each field survives, the views
    and identifiers accumulate, and the strongest confidence is kept. A product two batches read
    different *model numbers* for is two products, and so is one whose printed size or pack count
-   disagrees. The console says what the fold settled
-   (`Lot 142: the manifest is settled — 18 distinct item(s) — 41 unit(s) — read from 24 photograph(s)`),
-   and the row keeps the inventory, so an expanded row shows the manifest a price was derived from.
+   disagrees. The frames the batches declared goods-free are folded in too, and the console says what
+   the fold settled
+   (`Lot 142: the manifest is settled — 18 distinct item(s) — 41 unit(s) — read from 24 photograph(s) —
+   4 of the rest declared empty`),
+   and the row keeps the inventory, so an expanded row shows the manifest a price was derived from. The
+   one thing the fold cannot do is notice a frame no batch spoke about at all: it holds what the batches
+   said, so `ManifestBatchAnswer.unaccountedFrames(among:)` compares each answer with the frames it was
+   handed, and a frame in neither list is named on the console (`manifest batch 2 of 4 did not account
+   for photograph 5 — it is in no item's views and was not declared empty …`) — the inventory may be
+   short of the product that frame showed, and only the operator can look at it.
 5. **The manifest is priced in text-only requests** (`pricingPrompt`) — no photographs at all, held
    to `LotValuationPrompt.itemsSchema` like every other pass, with the quantities multiplied out and the
    manifest's `views` carried into each line's `photos`. One request per dozen inventory lines, because a
@@ -1664,6 +1682,50 @@ driving a consumer web page" is not, deliberately.
     there. Two pages are pinned offline in the harness (check 47) so neither surface can send the
     operator somewhere else, and the About box renders them as steps with the page as a link.
 
+37. **The batch is asked cold, and asked about every frame it was handed.** Deviation 33's manifest route
+    asked one question per batch of photographs and folded what came back, and both halves of that had a
+    hole in them.
+    **(a) Extraction is not an opinion.** Every request in the app sampled at `0.2`, which is the right
+    latitude for a valuation: two runs over the same photographs may reasonably word a price differently
+    or notice different things. It is the wrong latitude for the manifest pass, whose answer is not a
+    judgement but a reading — which products these frames show, and how many — and whose result is folded
+    into a count that is then priced and bid on. A pallet read twice that comes back 4 cases once and 5 the
+    next time is a bug the operator cannot reproduce, so that request is sent at `temperature: 0`
+    (`LotManifestPrompt.manifestTemperature`) while the pricing pass, the photograph reads and the
+    single-pass appraisals keep `LotValuationPrompt.standardTemperature` — the 0.2 they always had, now
+    named once rather than typed into two transports.
+    **(b) A batch answers about some of its frames, or about all of them.** The prompt asked a batch what
+    its photographs showed and let it stop there, so a batch that quietly said nothing about one of its
+    frames left a hole nothing could see: the inventory did not mention the product that frame held, and
+    the fold — whose whole job is to merge what the batches said — cannot invent a sighting no batch
+    reported. `views` is now **required** on every manifest line (a line with no photograph behind it is a
+    line the model invented), and the top level carries `unreadPhotos`: the gallery numbers of the frames
+    the batch read and found nothing sellable in. Together they are the batch's *account* of its own
+    frames, and the route holds it to that account — `ManifestBatchAnswer.unaccountedFrames(among:)`
+    compares each answer with the frames it was handed and names any frame in neither list (`Lot 312:
+    manifest batch 2 of 4 did not account for photograph 5 — it is in no item's views and was not declared
+    empty, so the inventory may be short of what it showed`). Nothing is retried over it: a second request
+    over one frame costs a whole request, and the next scan reads that frame anyway. The frames a batch
+    *did* declare empty ride on the inventory as `PalletManifest.unreadFrames`, and the settled line says
+    so (`… read from 24 photograph(s) — 4 of the rest declared empty`), because an inventory is also a
+    claim about the gallery: without that clause the line reads as though the pallet's other photographs
+    were never looked at. `unreadPhotos` is deliberately *not* required in the schema even though the
+    prompt insists on it — DeepSeek's `json_object` mode is advisory, and a provider that enforces a schema
+    strictly (Gemini's `responseSchema`, which will be handed this same value when the two providers split)
+    would fail a whole batch over an accounting list. The decode reads it when it is there and reads it as
+    empty when it is not, so a missing list becomes a reported gap rather than a discarded inventory.
+    **(c) The cue list, because the judgement the fold cannot make happens inside the batch.** Whether two
+    sightings are one carton is decided twice in this app: by `isSameProduct(as:)` (deviation 35) for
+    anything two batches both report, and by the model for the frames inside one batch, where the app can
+    never look. The prompt now says which cues to weigh — barcode digits, model or part number, brand with
+    product line and pack count, label wording, printed size, stack position and neighbours, damage — in
+    the order of trust the fold uses, and says which way to err when they do not settle it: one entry with
+    a note beats two entries, because a duplicate the operator can see and merge costs a glance, while a
+    phantom second product is counted, priced and bid on. The worked example is two sides of one 24-pack.
+    Harness check 48 drives a batch that answers about one frame, declares a second empty and passes over
+    two more, and asserts the schema, the cues, the account and the temperatures as they go out on the
+    wire — `temperature: 0` for the batch and 0.2 for the pass that prices it.
+
 ---
 
 Selectors live in data, not code: edit `ScrapeProfilePresets.genericBase()` or add a new
@@ -1724,6 +1786,7 @@ when a card carries three links.
 | A run walks past the last page, or loops | Should not be possible: the listing's own page count ends the walk when it reported one, a repeated page signature is caught against every page already read, and `ScrapeLimits.maximumPages` is the 100-page runaway guard. If it happens anyway, the site is answering different content for the same page number (a rotating "recommended" strip is enough) — the log's `Pagination: asked for page N, the site's address says page M` line says which address it actually landed on. |
 | "No active listings" | Working as intended (deviation 22): the page's own empty state — *"Results: No Items Found."* — or every scraped lot being marked sold. Nothing was spent and nothing failed. If the auction really does have lots, widen `noResultsSelectors` / `noResultsTextPattern` (a false positive) or check the auction page through the **info** glyph. |
 | The same carton appears twice in the table, as two lots of its own | The fold did not recognise the two sightings as one product (deviation 35). Read the console and the expanded row first: the manifest entries a price was derived from are listed there, and two entries that should have been one usually disagree about the printed size or pack count, or each reports a different model number — a reading problem rather than a fold problem. If both entries carry the *same* barcode digits and were still counted twice, that is a bug: a shared product code is meant to be conclusive. |
+| The console says a batch "did not account for photograph 5" | That batch's answer named no item seen in that frame and did not declare it empty (`LotManifestPrompt` rule 8), so its items were folded as usual and the inventory may be **short the product that frame showed** — open the lot, look at the frame (the numbering is the gallery's own), and press **Price** again if something is missing. Nothing is retried automatically: a request per frame costs more than the next scan, which reads that frame again anyway. See deviation 37. |
 | The board holds fewer lots than the listing shows | Read the console first: every page logs `N cards …, M new`. A *"yielded no lot"* line means the card selectors matched a tile nothing could be read from, so widen `cardSelectors` (or the tile is genuinely empty) — the count of `with a lot-page address` on the extracted line is the other clue. A *"lots already on the board"* line means two cards resolved to the *same lot page*, so check `detailLinkSelectors` and `nonLotHrefPattern`: an anchor that is not the lot's own (the catalogue, a share link) makes two lots look like one. |
 | The **Active** column says "Sold" on lots that are still open | The sold rule matched something the site did not mean. The site's own badge is the authority (a short status element, then a card attribute, then the card text), so add the site's real badge to `lotStatusSelectors` and, if its wording trips the fallback, tighten `soldTextPattern`. The harness's check 28 pins the "sold as one pallet" case, and the Node shim pins the badge cases. |
 | The **Active** column says "Active" on lots the site has sold | The marker is somewhere the profile does not look. Find the element that carries it on the auction page (the **info** glyph) and add its selector to `lotStatusSelectors` (or its attribute name to the list in `readCard`). Sold lots are only *flagged* — never dropped and never locked, so nothing is lost and nothing is off limits while you tune it. |

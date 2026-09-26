@@ -445,7 +445,7 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
 
         // Every batch's answer, by batch number — so the manifest is folded in gallery order however the
         // answers landed.
-        var answers: [[ManifestItem]?] = Array(repeating: nil, count: chunks.count)
+        var answers: [ManifestBatchAnswer?] = Array(repeating: nil, count: chunks.count)
         var firstFailure: Error?
         var failures: [String] = []
         // Frames with an answer behind them: read, or given up on. What the readout counts, exactly as it
@@ -454,7 +454,7 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         var requested = 0
 
         let width = min(Self.manifestBatchesInFlight, chunks.count)
-        await withTaskGroup(of: (Int, Result<[ManifestItem], Error>).self) { group in
+        await withTaskGroup(of: (Int, Result<ManifestBatchAnswer, Error>).self) { group in
             var next = 0
 
             while next < chunks.count {
@@ -482,7 +482,7 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
                 )
                 group.addTask { [self] in
                     do {
-                        let items = try await manifestBatch(
+                        let answer = try await manifestBatch(
                             description: description,
                             batch: index + 1,
                             batchCount: chunks.count,
@@ -493,8 +493,13 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
                         )
                         // The app's own reading of the frames this batch just answered about is folded into
                         // its answer: the digits the reader decoded are what joins two sightings of one
-                        // carton when the batches named the goods around them differently.
-                        let coded = Self.withLocalCodes(items, labels: labels, positions: chunk.positions)
+                        // carton when the batches named the goods around them differently. The batch's
+                        // account of its frames travels through unchanged — enriching items cannot change
+                        // which photographs it spoke for.
+                        let coded = ManifestBatchAnswer(
+                            items: Self.withLocalCodes(answer.items, labels: labels, positions: chunk.positions),
+                            unreadPhotos: answer.unreadPhotos
+                        )
                         return (index, .success(coded))
                     } catch {
                         return (index, .failure(error))
@@ -598,6 +603,12 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// The frames travel as `image_url` data URLs in the same user message as the question, exactly as
     /// the single-pass photograph pass sends its gallery — the difference between the two is the
     /// question, the schema, and how many frames one request is asked to reconcile against each other.
+    ///
+    /// Sent at `temperature: 0` (`LotManifestPrompt.manifestTemperature`), which is this route's
+    /// deliberate departure from the app's own sampling warmth: what comes back is extraction, and a
+    /// pallet read twice has to count the same twice. The answer carries the batch's *accounting* as well
+    /// as its goods (`ManifestBatchAnswer`), because a frame the batch says nothing about is a product
+    /// the inventory may be short of and only the route can see that.
     private func manifestBatch(
         description: String,
         batch: Int,
@@ -606,7 +617,7 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         images: [LotImage],
         imageCount: Int,
         evidence: LotImageEvidence
-    ) async throws -> [ManifestItem] {
+    ) async throws -> ManifestBatchAnswer {
         let body = try requestBody(
             systemInstruction: LotManifestPrompt.manifestSystemInstruction,
             prompt: LotManifestPrompt.manifestPrompt(
@@ -618,13 +629,16 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
                 evidence: evidence,
                 schemaText: Self.embeddedManifestSchema
             ),
-            images: images
+            images: images,
+            // Zero, unlike every other pass on this transport: this is an extraction, and the same pallet
+            // read twice must not come back with two different counts (`LotManifestPrompt.manifestTemperature`).
+            temperature: LotManifestPrompt.manifestTemperature
         )
         let answer = try await send(body)
         guard let choice = answer.choices?.first else {
             throw ValuationError.malformedResponse("the response contained no choices")
         }
-        return try LotManifestAnswer.items(
+        return try LotManifestAnswer.answer(
             fromAnswerText: Self.answerText(of: answer),
             finishReason: choice.finishReason
         )
@@ -681,10 +695,13 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// Files one batch's result: an answer to be folded in, or a failure to be reported and moved past.
     ///
     /// A failed batch is a hole in the inventory rather than a failed lot — the pallet is still worth
-    /// appraising from the batches that answered, and the console says which one was lost.
+    /// appraising from the batches that answered, and the console says which one was lost. A batch that
+    /// answered but left frames out of its account gets the same treatment from the other side: its
+    /// items are kept, and the frames it said nothing about are named (`PhotoScanEvent.manifestGap`),
+    /// because a photograph missing from both lists is a product the inventory may be short of.
     private func collectManifest(
-        _ finished: (Int, Result<[ManifestItem], Error>),
-        into answers: inout [[ManifestItem]?],
+        _ finished: (Int, Result<ManifestBatchAnswer, Error>),
+        into answers: inout [ManifestBatchAnswer?],
         answered: inout Int,
         firstFailure: inout Error?,
         failures: inout [String],
@@ -696,8 +713,8 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         let batch = index + 1
 
         switch result {
-        case .success(let items):
-            answers[index] = items
+        case .success(let answer):
+            answers[index] = answer
             answered += chunks[index].answered
             report(
                 PhotoScanReport(
@@ -705,12 +722,23 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
                     event: .manifested(
                         batch: batch,
                         of: chunks.count,
-                        items: items.count,
+                        items: answer.items.count,
                         answered: answered,
                         total: galleryCount
                     )
                 )
             )
+            // What the batch did *not* account for, if anything: the frames of its own batch that it
+            // named in no item and declared in no `unreadPhotos` list.
+            let gap = answer.unaccountedFrames(among: chunks[index].positions)
+            if !gap.isEmpty {
+                report(
+                    PhotoScanReport(
+                        lotNumber: lotNumber,
+                        event: .manifestGap(batch: batch, of: chunks.count, frames: gap)
+                    )
+                )
+            }
         case .failure(let error):
             if firstFailure == nil { firstFailure = error }
             let reason = ValuationError.describe(error)
@@ -1003,10 +1031,15 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// applies (passing `"low"` would downsample to 512×512 and cut cost at the price of legibility
     /// on small labels). The text pass passes an empty `images` array, which is a valid
     /// text-only user message.
+    ///
+    /// `temperature` is a parameter rather than a constant because exactly one caller wants a different
+    /// one: every pass samples at `LotValuationPrompt.standardTemperature`, and the manifest batch sends
+    /// zero (`LotManifestPrompt.manifestTemperature`).
     private func requestBody(
         systemInstruction: String,
         prompt: String,
-        images: [LotImage]
+        images: [LotImage],
+        temperature: Double = LotValuationPrompt.standardTemperature
     ) throws -> Data {
         var parts: [ChatContentPart] = [.text(prompt)]
         parts.append(contentsOf: images.map { .imageDataURL(mimeType: $0.mimeType, base64: $0.base64) })
@@ -1015,7 +1048,7 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
             model: modelID,
             messages: [.system(systemInstruction), .user(parts)],
             responseFormat: ChatCompletionRequest.ResponseFormat(type: "json_object"),
-            temperature: 0.2,
+            temperature: temperature,
             maxTokens: Self.maxOutputTokens,
             reasoningEffort: reasoningEffort
         )

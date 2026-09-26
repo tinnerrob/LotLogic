@@ -438,9 +438,26 @@ extension ManifestItem {
 /// is a legitimate state rather than a failure: a batch that showed nothing but the pallet's side
 /// returns no items, and a pallet whose *every* batch did is a pallet the route falls back from
 /// (`DeepSeekValuationService.value(subject:)`) instead of failing.
+///
+/// An inventory is also a claim about the gallery, so what the batches found *nothing* in is held here
+/// too (`unreadFrames`): the frames a batch declared goods-free are as much part of its answer as the
+/// items it named, and the two together are what the route can measure the batches' accounting against.
 struct PalletManifest: Codable, Hashable, Sendable {
 
     var items: [ManifestItem] = []
+
+    /// Gallery numbers the batches read and found nothing sellable in (`ManifestBatchAnswer.unreadPhotos`).
+    ///
+    /// The other half of what the batches were asked for: every photograph a batch was handed is either
+    /// named in some item's `views` or declared here, so `photographCount` plus this list is what the
+    /// inventory says it accounted for out of the gallery. Unioned and sorted as the batches are folded,
+    /// in whatever order they answered.
+    ///
+    /// A frame one batch declared unread and another named in an item is a contradiction between two
+    /// batches, and both facts are kept: the fold's job is to hold what the batches said, not to pick a
+    /// winner between them (the route reports a frame that *neither* list mentions —
+    /// `ManifestBatchAnswer.unaccountedFrames(among:)`).
+    var unreadFrames: [Int] = []
 
     var isEmpty: Bool { items.isEmpty }
 
@@ -470,6 +487,22 @@ struct PalletManifest: Codable, Hashable, Sendable {
         }
     }
 
+    /// Folds one batch's whole answer in: its items (`absorb(_:)`) and the frames it declared goods-free
+    /// (`noteUnread(_:)`), which together are everything the batch said about the frames it was handed.
+    mutating func absorb(_ answer: ManifestBatchAnswer) {
+        absorb(answer.items)
+        noteUnread(answer.unreadPhotos)
+    }
+
+    /// Records frames a batch read and found nothing sellable in, in gallery order and once each.
+    ///
+    /// Clamped like `views` (`LotManifestAnswer.positions(from:)`): a batch can only answer for frames
+    /// the gallery has, and nothing outside it belongs in an account of this pallet.
+    mutating func noteUnread(_ frames: [Int]) {
+        guard !frames.isEmpty else { return }
+        unreadFrames = Set((unreadFrames + frames).filter { $0 > 0 }).sorted()
+    }
+
     /// The inventory split into reply-sized pieces, in the order it holds them.
     ///
     /// Pricing asks for one line item per manifest line, and what a model can enumerate in a single reply
@@ -487,12 +520,20 @@ struct PalletManifest: Codable, Hashable, Sendable {
     }
 
     /// The console phrase: `18 distinct item(s) — 41 unit(s) — read from 24 photograph(s)`.
+    ///
+    /// A batch that declared frames goods-free adds its own clause, because those frames are the
+    /// inventory's answer for them — without it the line reads as though the pallet's other photographs
+    /// were never looked at.
     var logPhrase: String {
-        [
+        var parts = [
             "\(count) distinct item(s)",
             "\(unitCount) unit(s)",
             "read from \(photographCount) photograph(s)"
-        ].joined(separator: " — ")
+        ]
+        if !unreadFrames.isEmpty {
+            parts.append("\(unreadFrames.count) of the rest declared empty")
+        }
+        return parts.joined(separator: " — ")
     }
 
     /// The row's shorter form: `18 item(s) · 41 unit(s)`.

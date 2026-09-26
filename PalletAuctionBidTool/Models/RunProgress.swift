@@ -314,7 +314,10 @@ extension AppraisalStep {
             self = .pricingManifest(lines: items)
         case .fallingBack, .fallingBackFromManifest:
             self = .wholeGallery
-        case .folded, .grouped, .aggregated, .aggregatedLocally, .priced, .manifestSettled:
+        // A batch's missing account of one of its frames is news about the inventory rather than about
+        // the bar: every frame the batch *did* answer for is already counted by the events above, and the
+        // bar must not move backwards over a frame the model passed over.
+        case .folded, .grouped, .aggregated, .aggregatedLocally, .priced, .manifestSettled, .manifestGap:
             return nil
         }
     }

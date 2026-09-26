@@ -1049,13 +1049,18 @@ struct LotDetailRow: View {
     /// The batched route's counterpart to `readingsSummaryHelp`: there, one request per frame; here, one
     /// request per *batch* of frames, followed by a single pricing request that carries no photographs at
     /// all. Worth saying because the chip reads `18 item(s)`, which is the inventory the pallet was
-    /// priced from rather than a count of prices.
+    /// priced from rather than a count of prices. The frames the batches found nothing in are counted
+    /// here too, because "read from 24 photographs" on its own would read as though the rest of the batch
+    /// were never looked at.
     private var manifestSummaryHelp: String {
-        let count = lot.manifest?.photographCount ?? 0
-        return "The pallet's inventory, read from \(count) of its photographs in batches — each product "
-            + "counted once across every view the batches carried — and then priced in one text-only "
-            + "request. The manifest below is what the line items above were derived from, so a figure "
-            + "that looks wrong can be checked against the entry behind it."
+        let manifest = lot.manifest
+        let count = manifest?.photographCount ?? 0
+        let empty = manifest?.unreadFrames.count ?? 0
+        return "The pallet's inventory, read from \(count) of its photographs in batches"
+            + (empty > 0 ? " (\(empty) more were read and held nothing sellable)" : "")
+            + " — each product counted once across every view the batches carried — and then priced in "
+            + "one text-only request. The manifest below is what the line items above were derived from, "
+            + "so a figure that looks wrong can be checked against the entry behind it."
     }
 
 

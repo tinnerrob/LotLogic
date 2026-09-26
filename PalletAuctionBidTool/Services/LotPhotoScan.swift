@@ -224,6 +224,17 @@ enum PhotoScanEvent: Sendable, Equatable {
     /// batches that answered — and the console says which batch is missing from the inventory.
     case manifestFailed(batch: Int, of: Int, answered: Int, total: Int, reason: String)
 
+    /// A batch answered, but not about all of the photographs it was handed: some frame of its own batch
+    /// is named in no item's `views` and listed in no `unreadPhotos`, so the batch looked at it and said
+    /// nothing.
+    ///
+    /// Its own case rather than a clause on `.manifested`, because it is a fact about *what is missing*
+    /// rather than about what landed: the batch's items are kept and folded as usual (`PalletManifest`),
+    /// and the inventory may be short the product the frame showed. `frames` is in gallery order, which is
+    /// the numbering the batch was given and answers in — and that numbering is what lets the operator
+    /// open the lot and look at the frame the model passed over.
+    case manifestGap(batch: Int, of: Int, frames: [Int])
+
     /// Every batch has been folded into the pallet's inventory. The manifest travels with the event so
     /// the console line is the inventory's own account of itself (`PalletManifest.logPhrase`) rather
     /// than a second rendering of the same numbers that could drift from it.
@@ -284,6 +295,14 @@ enum PhotoScanEvent: Sendable, Equatable {
         case .manifestFailed(let batch, let of, let answered, let total, let reason):
             "manifest batch \(batch) of \(of) could not be read (\(reason)) — carrying on with the rest, "
                 + "\(answered) of \(total) photograph(s) answered"
+        case .manifestGap(let batch, let of, let frames):
+            (of > 1 ? "manifest batch \(batch) of \(of)" : "the manifest batch")
+                + " did not account for "
+                + (frames.count == 1
+                    ? "photograph \(frames[0])"
+                    : "photographs \(LotManifestPrompt.runPhrase(frames))")
+                + " — it is in no item's views and was not declared empty, so the inventory may be short "
+                + "of what it showed"
         case .manifestSettled(let manifest):
             "the manifest is settled — \(manifest.logPhrase)"
         case .fallingBackFromManifest(let reason):

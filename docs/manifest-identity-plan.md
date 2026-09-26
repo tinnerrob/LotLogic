@@ -1,7 +1,8 @@
 # Manifest identity & cross-view dedupe — implementation plan
 
 **Status:** Tier 1 (A–D) is implemented and green — `xcodebuild … CODE_SIGNING_ALLOWED=NO` builds and
-`Tools/free-tier-harness/run.sh` passes with checks 44–46 added. **Tiers 2–4 below are still to do.**
+`Tools/free-tier-harness/run.sh` passes with checks 44–46 added. **Tier 2 (E–G) is implemented too —
+harness check 48** — see *Tier 2* below for what it came to. **Tiers 3–4 below are still to do.**
 Each tier lands behind a green build and a green harness run before the next begins.
 
 **What Tier 1 actually came to, against the plan below.** A: the route groups the gallery before it
@@ -82,21 +83,40 @@ point.
 - **Acceptance:** `Yankee Candle 22 oz jar` vs `yankee candles, 22oz` merge; `Energizer MAX AA` vs
   `Duracell AA` do not.
 
-## Tier 2 — model-side prompt and contract
+## Tier 2 — model-side prompt and contract — **done** (harness check 48)
 
-- **E. `views` required and exhaustive.** Add `views` to `manifestSchema.required`, and add a
-  top-level `unreadPhotos: [Int]` so every frame is either named in some item's `views` or declared
-  goods-free. Decoding tolerates a missing `unreadPhotos`.
-- **F. Same-carton cues and tiebreaker.** Extend `manifestSystemInstruction` with concrete cues (same
-  barcode, same label wording, same brand + pack size, same stack position and neighbour, same
-  damage) plus the rule "one entry with a note beats two entries", and a worked example of two sides
-  of one 24-pack.
-- **G. Manifest temperature 0.0.** Parameterise `requestBody` so the manifest batch sends
-  `temperature: 0.0` (extraction wants determinism) while the pricing and reading passes keep `0.2`;
-  mirror the same on the Gemini manifest path.
-- **Acceptance (harness):** the schema lists `views` as required; the prompt carries the
-  exhaustiveness rule and the cue list; the manifest request body's `temperature` is asserted to be
-  `0.0`.
+- **E. `views` required and exhaustive.** — **done.** `views` joined the manifest line's `required`
+  (`itemName`, `quantity`, `confidence`, `views`), and the top level grew `unreadPhotos` — an array of
+  gallery numbers — so every frame a batch was handed is either named in some entry's `views` or
+  declared goods-free. The schema asks for it but does *not* require it, deliberately: DeepSeek's
+  `json_object` mode is advisory, and the strict `responseSchema` provider (Tier 4's Gemini path) would
+  fail a whole batch over an accounting list. The decode reads it when it is there and reads it as empty
+  when it is not (`LotManifestAnswer.answer(fromAnswerText:finishReason:)` →
+  `ManifestBatchAnswer`), and what the answer *did not* account for is named rather than swallowed:
+  `ManifestBatchAnswer.unaccountedFrames(among:)` compares the answer with the frames the batch carried,
+  the route reports the difference (`PhotoScanEvent.manifestGap`), and the frames a batch did declare
+  empty ride on the inventory as `PalletManifest.unreadFrames` so the settled console line says
+  `… 4 of the rest declared empty` instead of reading as though those photographs were never looked at.
+- **F. Same-carton cues and tiebreaker.** — **done.** `manifestSystemInstruction` gained two rules: a
+  cue list in the fold's own order of trust (barcode digits → model/part/SKU → brand with product line
+  and pack count → label wording → printed size/weight/count → stack position and neighbours → damage
+  and repacking), with a disagreement where it counts meaning two products; and the tiebreaker — *one
+  entry with a note beats two entries* — with the worked example of two sides of one 24-pack (one entry,
+  both frames in `views`, not a count of 2). The batch question repeats the accounting obligation where
+  the gallery numbering is stated.
+- **G. Manifest temperature 0.0.** — **done.** `LotManifestPrompt.manifestTemperature` is `0.0` and is
+  what the DeepSeek batch sends; `LotValuationPrompt.standardTemperature` names the `0.2` every other
+  pass samples at (the pricing pass, the photograph reads, the single-pass appraisals, in both
+  transports — the literal is gone from `GeminiValuationService` too). The Gemini half of the "mirror"
+  is a Tier 4 job: that transport has no batched path yet, so when `ManifestService` lands it passes the
+  same constant rather than its own.
+- **Acceptance (harness):** check 48 reads the schema as JSON (a line must carry `views`;
+  `unreadPhotos` is an array of numbers; the top level still requires only `manifest`), asserts each cue
+  and the tiebreaker in the prompt, asserts both temperatures as constants, and then drives a real batch
+  that answers about one frame, declares a second empty and passes over two more — asserting the
+  inventory's `unreadFrames`, the settled line's clause, the `manifestGap` event's frames and its
+  console wording, and `temperature: 0` on the batch request against `0.2` on the pricing request.
+  (Check 39 covers the decode: a missing list reads as empty, and the same positions clamp applies.)
 
 ## Tier 3 — count accuracy
 
@@ -154,9 +174,10 @@ armed-provider pair.
 
 ## Order of work
 
-1. Tier 1 (A → B → C → D) — the biggest accuracy wins, all on-device or in the fold.
-2. Tier 2 (E → F → G) — prompt and contract, verified by the harness.
-3. Tier 3 (H) — count resolution.
+1. Tier 1 (A → B → C → D) — the biggest accuracy wins, all on-device or in the fold. **Done.**
+2. Tier 2 (E → F → G) — prompt and contract, verified by the harness. **Done** (check 48; README
+   deviation 37).
+3. Tier 3 (H) — count resolution. **Next.**
 4. Tier 4 (I, credentials, J) — the largest surface, last, because it needs two keys and a new picker.
    (The Account sheet's two key sections and the About sheet's key instructions landed early, as
    deviation 36 — see *Credentials and the Account sheet*.)

@@ -5,7 +5,9 @@
 //  Compiles the real services (Services/LotValuation.swift, GeminiValuationService.swift,
 //  DeepSeekValuationService.swift) against a URLProtocol stub, so the 429 retry loop,
 //  Retry-After handling, RequestPacer pacing, request shaping and the shared decode can be
-//  checked without a key and without touching the network. The provider list's own copy is
+//  checked without a key and without touching the network — the batched manifest route's contract
+//  included: the schema it has to answer in, the cues it is told to weigh, the frames it has to
+//  account for, and the temperature it is asked at. The provider list's own copy is
 //  checked too (where each key comes from, what it costs), because two sheets print it and
 //  neither may drift from the README. Not part of the app target.
 //
@@ -118,7 +120,7 @@ final class ReportLog: @unchecked Sendable {
                  .manifestFailed(_, _, let answered, _, _):
                 return answered
             case .folded, .grouped, .aggregating, .aggregated, .aggregatedLocally, .fallingBack,
-                 .fallingBackFromManifest, .manifestSettled, .pricing, .priced:
+                 .fallingBackFromManifest, .manifestSettled, .manifestGap, .pricing, .priced:
                 return nil
             }
         }
@@ -332,6 +334,22 @@ let threePhotoSubject = ValuationSubject(
     detailURL: nil
 )
 
+/// A four-photograph lot, so a single batch can be handed more frames than it answers about — which is
+/// what the batch contract is measured on (`LotManifestPrompt` rule 8, `PhotoScanEvent.manifestGap`).
+let fourPhotoSubject = ValuationSubject(
+    lotNumber: "312",
+    title: "Pallet of candles and batteries",
+    rawDescription: "Mixed lot, 40 pieces.",
+    currentBid: 120,
+    imageURLs: [
+        URL(string: "https://cdn.example.test/lot-312-1.jpg")!,
+        URL(string: "https://cdn.example.test/lot-312-2.jpg")!,
+        URL(string: "https://cdn.example.test/lot-312-3.jpg")!,
+        URL(string: "https://cdn.example.test/lot-312-4.jpg")!
+    ],
+    detailURL: nil
+)
+
 /// A photograph step, as the loader will accept it.
 func photoStep() -> StubScript.Step {
     StubScript.Step(status: 200, body: jpegBytes, headers: ["Content-Type": "image/jpeg"])
@@ -468,13 +486,18 @@ struct StubManifestLine {
 }
 
 /// A batch's manifest answer, in the schema the batch prompt asks for.
-func manifestBody(_ lines: [StubManifestLine]) -> Data {
+///
+/// `unread` is the batch's *accounting* rather than its findings: the gallery numbers it declares to show
+/// nothing sellable (`LotManifestPrompt.manifestPrompt`, rule 8). Passed in when a test is about what a
+/// batch did or did not account for.
+func manifestBody(_ lines: [StubManifestLine], unread: [Int]? = nil) -> Data {
     let rendered = lines.map { line -> String in
         let codes = line.identifiers.map { "\"\($0)\"" }.joined(separator: ",")
         let places = line.views.map(String.init).joined(separator: ",")
         return #"{"itemName":"\#(line.name)","brand":"\#(line.brand)","modelNumber":"\#(line.model)","quantity":\#(line.quantity),"confidence":"\#(line.confidence)","identifiers":[\#(codes)],"views":[\#(places)]}"#
     }
-    return chatEnvelope(#"{"manifest":[\#(rendered.joined(separator: ","))]}"#)
+    let accounting = unread.map { ",\"unreadPhotos\":[\($0.map(String.init).joined(separator: ","))]" } ?? ""
+    return chatEnvelope(#"{"manifest":[\#(rendered.joined(separator: ","))]\#(accounting)}"#)
 }
 
 /// DeepSeek's 429 envelope: a concurrency ceiling, not a per-minute quota.
@@ -3016,19 +3039,29 @@ do {
     check(split.count == 2, "two model numbers are two products", detail: "\(split.count)")
 
     // The decode, both ways: an empty inventory is an answer, garbage is a failure.
-    let empty = try LotManifestAnswer.items(fromAnswerText: #"{"manifest":[]}"#, finishReason: "stop")
-    check(empty.isEmpty, "an empty manifest decodes to no items rather than failing")
-    let decoded = try LotManifestAnswer.items(
-        fromAnswerText: #"{"manifest":[{"itemName":" Candles ","quantity":6.0,"views":[1,1,2],"confidence":"high"}]}"#,
+    let empty = try LotManifestAnswer.answer(fromAnswerText: #"{"manifest":[]}"#, finishReason: "stop")
+    check(empty.items.isEmpty, "an empty manifest decodes to no items rather than failing")
+    check(empty.unreadPhotos.isEmpty, "with an empty accounting, because the answer said nothing about its frames")
+    let decoded = try LotManifestAnswer.answer(
+        fromAnswerText: #"{"manifest":[{"itemName":" Candles ","quantity":6.0,"views":[1,1,2],"confidence":"high"}],"unreadPhotos":[9,4,4,0,-2]}"#,
         finishReason: "stop"
     )
-    check(decoded.count == 1 && decoded[0].itemName == "Candles", "one line decodes with its wording tidied", detail: decoded.first?.itemName ?? "—")
-    check(decoded[0].quantity == 6, "a JSON-mode 6.0 is six units", detail: "\(decoded[0].quantity)")
-    check(decoded[0].views == [1, 2], "views are deduped and sorted", detail: "\(decoded[0].views)")
-    check(decoded[0].confidence == "High", "and confidence is normalised", detail: decoded[0].confidence)
+    check(decoded.items.count == 1 && decoded.items[0].itemName == "Candles", "one line decodes with its wording tidied", detail: decoded.items.first?.itemName ?? "—")
+    check(decoded.items[0].quantity == 6, "a JSON-mode 6.0 is six units", detail: "\(decoded.items[0].quantity)")
+    check(decoded.items[0].views == [1, 2], "views are deduped and sorted", detail: "\(decoded.items[0].views)")
+    check(decoded.items[0].confidence == "High", "and confidence is normalised", detail: decoded.items[0].confidence)
+    check(decoded.unreadPhotos == [4, 9], "the frames it declared empty are deduped, sorted and clamped like views", detail: "\(decoded.unreadPhotos)")
+
+    // The contract, as the batch can be held to it: a frame it named is accounted for, whatever else the
+    // answer says; a frame in neither list is one it looked at and said nothing about.
+    check(decoded.unaccountedFrames(among: [1, 2, 4, 9]).isEmpty,
+          "a batch that named its items and declared the rest has accounted for everything")
+    check(decoded.unaccountedFrames(among: [1, 2, 3, 4, 9]) == [3],
+          "and one that passed over a frame is reported with the number of the frame",
+          detail: "\(decoded.unaccountedFrames(among: [1, 2, 3, 4, 9]))")
 
     var threw = false
-    do { _ = try LotManifestAnswer.items(fromAnswerText: #"{"items":[]}"#, finishReason: "stop") } catch { threw = true }
+    do { _ = try LotManifestAnswer.answer(fromAnswerText: #"{"items":[]}"#, finishReason: "stop") } catch { threw = true }
     check(threw, "an answer with no manifest key fails rather than reading as an empty pallet")
 
     let rendered = LotManifestPrompt.render(manifest)
@@ -3473,6 +3506,133 @@ do {
     check(armed.id == ValuationProvider.gemini.rawValue && idle.id == ValuationProvider.deepSeek.rawValue,
           "each row is identified by its provider, so a list of both cannot mix them up",
           detail: "\(armed.id) / \(idle.id)")
+}
+
+// MARK: - 48. The batch contract (Tier 2)
+
+do {
+    print("48. A batch must answer for every frame it was handed, and is asked cold so it answers the same twice")
+
+    // The schema: `views` is what makes a line a sighting rather than a guess, so a line must carry it,
+    // and `unreadPhotos` is the other half of the answer. Read as JSON rather than as text so the shape
+    // asserted is the shape a provider would enforce.
+    let schema = (try? JSONSerialization.jsonObject(
+        with: Data(LotManifestPrompt.manifestSchema.jsonSchemaText.utf8)
+    )) as? [String: Any] ?? [:]
+    let properties = schema["properties"] as? [String: Any] ?? [:]
+    let lines = (properties["manifest"] as? [String: Any])?["items"] as? [String: Any] ?? [:]
+    let lineRequired = lines["required"] as? [String] ?? []
+    check(lineRequired.contains("views"),
+          "a manifest line must say which photographs it was seen in", detail: "\(lineRequired)")
+    check(Set(lineRequired) == ["itemName", "quantity", "confidence", "views"],
+          "and views is the only field that was added to what a line already had to carry",
+          detail: "\(lineRequired.sorted())")
+    let unread = properties["unreadPhotos"] as? [String: Any]
+    check(unread?["type"] as? String == "array"
+            && ((unread?["items"] as? [String: Any])?["type"] as? String) == "number",
+          "the answer also carries the gallery numbers of the frames the batch found nothing in",
+          detail: "\(unread ?? [:])")
+    check(schema["required"] as? [String] == ["manifest"],
+          "while that accounting stays optional, so a provider that enforces the schema cannot fail a whole batch over it",
+          detail: "\(schema["required"] ?? [])")
+
+    // The prompt: what the fold cannot do for the model. Whether two sightings are one carton is a
+    // judgement made inside the batch, so the cues it is told to weigh are the fold's identity test one
+    // route over.
+    let instruction = LotManifestPrompt.manifestSystemInstruction
+    for cue in [
+        "same barcode digits",
+        "same model, part or SKU number",
+        "same brand with the same product line and pack count",
+        "same wording on the label",
+        "same size, weight or printed count",
+        "same place in the stack with the same neighbours",
+        "same damage, repacking or price sticker"
+    ] {
+        check(instruction.contains(cue), "the batch is told to weigh \(cue)")
+    }
+    check(instruction.contains("one entry with a note beats two entries"), "and told which way to err")
+    check(instruction.contains("24-pack") && instruction.contains("not a count of 2"),
+          "with the worked example of two sides of one 24-pack")
+    check(instruction.contains("`unreadPhotos`") && instruction.contains("never leave a frame unmentioned"),
+          "and the accounting rule that makes every attached frame the batch's business")
+
+    let question = LotManifestPrompt.manifestPrompt(
+        description: "Mixed lot, 40 pieces.", batch: 2, batchCount: 4, positions: [7, 8], imageCount: 24
+    )
+    check(question.contains("Account for every photograph attached") && question.contains("`unreadPhotos`"),
+          "which the batch question states too, right where its frames' numbering is",
+          detail: String(question.suffix(160)))
+
+    // The temperature: extraction is asked the one question there is an answer to, while every pass whose
+    // answer is an opinion keeps the app's ordinary warmth.
+    check(LotManifestPrompt.manifestTemperature == 0.0,
+          "the manifest batch is sent at temperature zero", detail: "\(LotManifestPrompt.manifestTemperature)")
+    check(LotValuationPrompt.standardTemperature > 0,
+          "while the valuation passes keep sampling", detail: "\(LotValuationPrompt.standardTemperature)")
+
+    // One batch, handed four frames, answers about one of them, declares one empty and says nothing about
+    // the other two — which is the shape of the mistake the contract exists to catch. One batch rather
+    // than several because the stub hands answers out as requests arrive: a single request is the only
+    // way the assertions below can be about the frames the answer was actually given.
+    let script = StubScript([
+        .init(status: 200, body: frameBytes(1), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(2), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(3), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(4), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: manifestBody(
+            [StubManifestLine(name: "Yankee Candle 22 oz jar", brand: "Yankee Candle", quantity: 4, views: [1])],
+            unread: [2]
+        )),
+        .init(status: 200, body: deepSeekSuccessBody) // the pricing pass
+    ])
+    let reports = ReportLog()
+    let service = makeDeepSeekService(
+        script,
+        requestsPerMinute: 0,
+        maxAttempts: 1,
+        photosPerRequest: 6,
+        report: { reports.note($0) }
+    )
+    let outcome = try await service.value(subject: fourPhotoSubject)
+
+    let manifest = outcome.manifest ?? PalletManifest()
+    check(manifest.count == 1, "the batch's one item is the whole inventory", detail: "\(manifest.count)")
+    check(manifest.photographCount == 1,
+          "it speaks for the frame the item named", detail: "\(manifest.photographCount)")
+    check(manifest.unreadFrames == [2],
+          "and the frame it declared empty is kept as the batch's own account of it",
+          detail: "\(manifest.unreadFrames)")
+    check(manifest.logPhrase.hasSuffix("1 of the rest declared empty"),
+          "so the settled inventory says so rather than reading as though the other frames were never looked at",
+          detail: manifest.logPhrase)
+
+    let gapEvents = reports.events.compactMap { event -> [Int]? in
+        if case .manifestGap(_, _, let frames) = event { return frames } else { return nil }
+    }
+    check(gapEvents == [[3, 4]],
+          "and the frames it passed over in silence are named on the console", detail: "\(gapEvents)")
+    let gapLine = PhotoScanReport(lotNumber: "312", event: .manifestGap(batch: 1, of: 1, frames: [3, 4])).logLine
+    check(gapLine.contains("photographs 3-4") && gapLine.contains("may be short of what it showed"),
+          "in the gallery numbering the batch was given, so the operator can open those frames",
+          detail: gapLine)
+
+    let chats = script.requests.filter { $0.url.absoluteString == "https://api.deepseek.com/chat/completions" }
+    let batchChat = chats.first { !imageURLs(in: $0).isEmpty }
+    let pricingChat = chats.first { imageURLs(in: $0).isEmpty }
+    check(chats.count == 2, "one batch request and one pricing request were posted", detail: "\(chats.count)")
+    check(batchChat?.json["temperature"] as? Double == 0.0,
+          "the batch request carries temperature zero", detail: "\(batchChat?.json["temperature"] ?? "none")")
+    check(pricingChat?.json["temperature"] as? Double == 0.2,
+          "while the pass that prices what the batch found keeps the app's ordinary temperature",
+          detail: "\(pricingChat?.json["temperature"] ?? "none")")
+    check(userText(in: batchChat).contains("photographs 1-4 of 4 are attached"),
+          "and the batch was told which frames it was answering for",
+          detail: String(userText(in: batchChat).prefix(120)))
+
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
 }
 
 print(tally.value == 0 ? "\nALL CHECKS PASSED" : "\n\(tally.value) CHECK(S) FAILED")
