@@ -16,8 +16,8 @@ import Foundation
 /// ## Why REST instead of an SDK
 /// The brief asked for a `GoogleGenAI`-style Swift SDK. No such Swift package exists on the
 /// public registry (Google ships Python, JS, Java, Go and .NET SDKs), so this type talks to the
-/// documented `v1beta` REST endpoint directly. A currently-supported Flash model is used —
-/// `gemini-1.5-flash` has been retired — see `defaultModelID`.
+/// documented `v1beta` REST endpoint directly. The current Flash model is used — `1.5-flash` and then
+/// the whole 2.5 series have been retired — see `defaultModelID`.
 ///
 /// ## Free tier
 /// No billing account is needed: an AI Studio key on the free tier drives this exact endpoint.
@@ -44,21 +44,42 @@ import Foundation
 /// (`PhotoReadingStore`). The single pass over the whole gallery remains the default and the fallback,
 /// so nothing that does not opt in behaves differently.
 ///
+/// ## The manifest role (Tier 4)
+/// This transport also fills the **identity** half of the batched route when the operator points it
+/// there (`ManifestService`, `AppSettings.identityProvider`): `manifestBatch(_:)` asks the batch
+/// question about a run of frames and answers with manifest items, which another transport then
+/// prices. That is not a third route — the pricing half stays on whichever provider was armed — and
+/// it is worth having for one structural reason: a `:generateContent` call carries
+/// `LotManifestPrompt.manifestSchema` as `responseSchema`, so a batch that leaves `views` out is
+/// refused by the API rather than decoded around, where JSON mode can only ask for the shape in
+/// prose.
+///
 /// ## Why `@unchecked Sendable`
 /// All stored properties are immutable value/`let` references, and the only shared mutable
 /// object is `URLSession`, which is documented as safe to use from multiple threads. The
 /// annotation papers over the fact that the SDK's `Sendable` conformance for `URLSession`
 /// depends on the toolchain in use.
-struct GeminiValuationService: ValuationService, @unchecked Sendable {
+struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sendable {
 
-    /// Currently supported multimodal flash model.
-    static let defaultModelID = "gemini-2.5-flash"
+    /// The current multimodal Flash model.
+    ///
+    /// The default moves with the current release rather than pinning a season that has ended, which is
+    /// the same rule that took `gemini-1.5-flash` out: the 2.5 series — flash, flash-lite *and* the pro
+    /// model the identity role used — is retired, so this points at `gemini-3.8-flash`.
+    static let defaultModelID = "gemini-3.8-flash"
 
-    /// Alternatives offered in the UI.
+    /// The models offered in the UI.
+    ///
+    /// One entry, because one series is current. There were four while 2.5 was: a cheaper `flash-lite` for
+    /// appraisal, `2.0-flash`, and `gemini-2.5-pro` for the **identity** half of the split (Tier 4 of
+    /// `docs/manifest-identity-plan.md` — reading a carton's printed model number, barcode digits and count
+    /// off a photograph is the job a stronger model earns its price at). All of them retired together with
+    /// the series they belonged to, and nothing needs replacing: the identity role still buys its own model,
+    /// whichever one this section names (`AppSettings.manifestModelID`), and the win the split was built for
+    /// survives the retirement intact — the reader's half is paid for on the free Gemini key while the
+    /// prices stay on the appraiser's balance.
     static let availableModelIDs = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash"
+        "gemini-3.8-flash"
     ]
 
     static let endpointBase = URL(string: "https://generativelanguage.googleapis.com/v1beta/models")!
@@ -305,6 +326,30 @@ struct GeminiValuationService: ValuationService, @unchecked Sendable {
         let body = try aggregationRequestBody(request)
         let answer = try await send(body)
         return try decodeItems(from: answer)
+    }
+
+    // MARK: - Manifest
+
+    /// Reads one batch of a lot's photographs into manifest items (`ManifestService`).
+    ///
+    /// The identity half of a batched appraisal, run on *this* transport because the operator pointed
+    /// the identity role here (`AppSettings.identityProvider`): the same question a DeepSeek batch is
+    /// asked, answered by a `:generateContent` call whose answer shape is *enforced* rather than
+    /// requested — `LotManifestPrompt.manifestSchema` travels as `responseSchema`, so the keys the
+    /// fold reads are the API's business rather than the prompt's, which is the one structural
+    /// advantage this transport has over JSON mode.
+    ///
+    /// The prompt therefore carries no schema *text*, exactly as every other pass here, and the
+    /// temperature is `LotManifestPrompt.manifestTemperature` rather than this transport's usual
+    /// warmth: what comes back is extraction, and a pallet read twice has to count the same twice.
+    func manifestBatch(_ request: ManifestBatchRequest) async throws -> ManifestBatchAnswer {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ValuationError.missingAPIKey
+        }
+        let body = try manifestBatchRequestBody(request)
+        let answer = try await send(body)
+        let (text, finishReason) = try answerText(from: answer)
+        return try LotManifestAnswer.answer(fromAnswerText: text, finishReason: finishReason)
     }
 }
 
@@ -554,6 +599,45 @@ extension GeminiValuationService {
         )
         return try JSONEncoder().encode(body)
     }
+
+    /// Builds the single-batch `:generateContent` body for the manifest route's identity pass.
+    ///
+    /// No schema text in the prompt, unlike the same request on the batching transport: the shape is
+    /// `responseSchema` here, and prose describing a schema on top of an enforced one only gives the
+    /// model two things to reconcile. The frames travel as `inline_data` parts in the same user
+    /// message as the question — the batch question is written to be answered with several
+    /// photographs in hand, which is the whole point of the batch.
+    private func manifestBatchRequestBody(_ request: ManifestBatchRequest) throws -> Data {
+        var parts: [RequestPart] = [
+            .text(
+                LotManifestPrompt.manifestPrompt(
+                    description: request.description,
+                    batch: request.batch,
+                    batchCount: request.batchCount,
+                    positions: request.positions,
+                    imageCount: request.imageCount,
+                    evidence: request.evidence
+                )
+            )
+        ]
+        parts.append(contentsOf: request.images.map { .image(mimeType: $0.mimeType, base64: $0.base64) })
+
+        let body = GenerateContentRequest(
+            systemInstruction: GenerateContentRequest.SystemInstruction(
+                parts: [GenerateContentRequest.TextPart(text: LotManifestPrompt.manifestSystemInstruction)]
+            ),
+            contents: [GenerateContentRequest.Content(role: "user", parts: parts)],
+            generationConfig: GenerateContentRequest.GenerationConfig(
+                // Zero, unlike every other pass here: an extraction, not a judgement
+                // (`LotManifestPrompt.manifestTemperature`).
+                temperature: LotManifestPrompt.manifestTemperature,
+                responseMimeType: "application/json",
+                responseSchema: LotManifestPrompt.manifestSchema
+            )
+        )
+        return try JSONEncoder().encode(body)
+    }
+
 
     /// POSTs the request and decodes the envelope.
     private func send(_ body: Data) async throws -> GenerateContentResponse {

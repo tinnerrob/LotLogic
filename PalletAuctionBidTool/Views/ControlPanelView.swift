@@ -231,7 +231,10 @@ struct ControlPanelView: View {
         .keyboardShortcut(",", modifiers: .command)
         .help(
             (needsAPIKey
-                ? "Site login, provider, model and API key — no key is set, so nothing can be scanned."
+                // Names the key rather than counting them: a split run needs two, and "a key is missing"
+                // beside two sections is the riddle `missingKeyPhrase` exists to answer.
+                ? "Site login, provider, model and API key — \(settings.missingKeyPhrase) is missing, so "
+                    + "nothing can be scanned yet."
                 : "Site login, provider, model and API key.")
                 + "  \(settingsSummary)  ·  ⌘,"
         )
@@ -242,8 +245,9 @@ struct ControlPanelView: View {
         Button("Tuning") { presentedSheet = .tuning }
             .buttonStyle(TitlebarMenuButtonStyle())
             .help(
-                "How far a run walks (\(settings.pageLimitSummary)), how fast it calls out, how many "
-                    + "photographs a scan reads one at a time, and the bid percentages and anchor "
+                "How far a run walks (\(settings.pageLimitSummary)), how fast it calls out, how a "
+                    + "lot's photographs are read — one at a time, the whole gallery in a single "
+                    + "request, or DeepSeek's batches — and the bid percentages and anchor "
                     + "threshold behind the table's numbers."
             )
     }
@@ -257,8 +261,10 @@ struct ControlPanelView: View {
             )
     }
 
-    /// `true` while nothing can be appraised: no key for the selected provider, which is the one
-    /// combination worth a warning, and what the dot on **Account** marks.
+    /// `true` while nothing can be appraised: no key for the provider that would do the work — the
+    /// appraiser's, and, when a batched run would read its manifest on a *second* provider, that one's
+    /// too (`AppSettings.missingKeyProvider`). The one combination worth a warning, and what the dot on
+    /// **Account** marks.
     private var needsAPIKey: Bool { !settings.hasAPIKey }
 
     // MARK: - URL
@@ -373,6 +379,14 @@ struct ControlPanelView: View {
     private var settingsSummary: String {
         var parts: [String] = [settings.email.isEmpty ? "no site login" : settings.email]
         parts.append(contentsOf: settings.providerKeyStates.map(\.summary))
+        // Which model reads a batched run's manifests, when that is not the appraiser: the states above
+        // name each provider's *appraising* model, and a split run points one section's model at a
+        // different job entirely (Tier 4).
+        if settings.runsSplitIdentity {
+            parts.append(
+                "manifests read by \(settings.manifestProvider.displayName) \(settings.manifestModelID)"
+            )
+        }
         return parts.joined(separator: "  ·  ")
     }
 

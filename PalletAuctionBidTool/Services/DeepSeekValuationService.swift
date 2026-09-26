@@ -40,6 +40,14 @@ import Foundation
 ///   product up from its brand, model number, printed size and barcode digits — the fields the manifest
 ///   spent its rules collecting.
 ///
+/// ## Who reads the batches is a choice (Tier 4)
+/// The route's two halves are separable, and this service only owns the second by right. Given a
+/// `manifestService` (`AppSettings.identityProvider`, `ManifestService`), the batches are read by
+/// *that* transport's model and the manifest it returns is priced here — so the vision half can be
+/// bought from the model that reads a carton best while the text half stays on the cheaper key. With
+/// none given — the default — this transport reads its own batches, exactly as it did before the
+/// split existed, and `ManifestService` is what the route has always been doing in one file.
+///
 /// ## The other two routes, and when they run
 /// * **The thorough path** (`LotPhotoScan`, `photoScan`) reads **one photograph per request** and
 ///   reconciles the readings. It is opt-out here rather than removed: a lot whose small items hide in
@@ -62,7 +70,7 @@ import Foundation
 /// As with `GeminiValuationService`: every stored property is an immutable value or a `let`
 /// reference, and the only shared mutable object is `URLSession`, which is documented as safe to
 /// use from multiple threads.
-struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
+struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked Sendable {
 
     /// The only image-capable model DeepSeek serves.
     static let defaultModelID = "deepseek-flash"
@@ -155,6 +163,16 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// Where per-photograph readings are remembered between scans (`PhotoReadingStore`).
     let store: PhotoReadingStore
 
+    /// The service that reads this service's manifest batches, when the identity role belongs to
+    /// another provider (`ManifestService`, `AppSettings.identityProvider`).
+    ///
+    /// `nil` — the default — means this transport batches itself: a run's own key reads the gallery
+    /// and prices what it read, which is every install that has not asked for a split. Given a
+    /// service, the batches go there instead and `manifestRoute` is the only thing that changes: the
+    /// fold, the accounting, the console and the pricing pass are this transport's either way, so a
+    /// split run is not a second route to keep in step.
+    let manifestService: ManifestService?
+
     /// Progress for a caller with somewhere to print it.
     private let report: @Sendable (PhotoScanReport) -> Void
 
@@ -169,6 +187,7 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         reasoningEffort: String? = "none",
         photoScan: PhotoScanPlan = .disabled,
         photosPerRequest: Int = 0,
+        manifestService: ManifestService? = nil,
         store: PhotoReadingStore = .shared,
         report: @escaping @Sendable (PhotoScanReport) -> Void = { _ in }
     ) {
@@ -180,6 +199,7 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
         self.maxAttempts = max(1, maxAttempts)
         self.photoScan = photoScan
         self.photosPerRequest = max(0, photosPerRequest)
+        self.manifestService = manifestService
         self.store = store
         self.report = report
         self.reasoningEffort = reasoningEffort
@@ -482,14 +502,20 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
                 )
                 group.addTask { [self] in
                     do {
-                        let answer = try await manifestBatch(
-                            description: description,
-                            batch: index + 1,
-                            batchCount: chunks.count,
-                            positions: chunk.positions,
-                            images: chunk.images,
-                            imageCount: galleryCount,
-                            evidence: batchEvidence
+                        // The identity half, handed to whichever service the operator pointed it at
+                        // (`AppSettings.identityProvider`); with none named this is `self`, which is
+                        // the route exactly as it always was.
+                        let reader: any ManifestService = manifestService ?? self
+                        let answer = try await reader.manifestBatch(
+                            ManifestBatchRequest(
+                                description: description,
+                                batch: index + 1,
+                                batchCount: chunks.count,
+                                positions: chunk.positions,
+                                images: chunk.images,
+                                imageCount: galleryCount,
+                                evidence: batchEvidence
+                            )
                         )
                         // The app's own reading of the frames this batch just answered about is folded into
                         // its answer: the digits the reader decoded are what joins two sightings of one
@@ -576,6 +602,9 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
                 imagesSent: galleryCount,
                 imagesSkipped: download.overBudget.count,
                 modelID: modelID,
+                // Named only when the identity pass was another service's: `nil` says the model above
+                // read the manifest too, which is what every other route in the app does.
+                identityModelID: manifestService?.modelID,
                 // Every batch, plus the requests that priced them.
                 passes: requested + manifest.batches(ofSize: Self.manifestItemsPerPriceRequest).count,
                 evidence: evidence,
@@ -600,6 +629,10 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// Reads one batch of a lot's photographs into manifest items: one `/chat/completions` call carrying
     /// several frames, the batch question and the manifest schema.
     ///
+    /// This transport's own answer to the `ManifestService` question, and the default one: the route
+    /// calls it directly while the identity role is unfilled (`manifestService`), and the operator can
+    /// name it explicitly as well (`IdentityProvider.deepSeek`).
+    ///
     /// The frames travel as `image_url` data URLs in the same user message as the question, exactly as
     /// the single-pass photograph pass sends its gallery — the difference between the two is the
     /// question, the schema, and how many frames one request is asked to reconcile against each other.
@@ -608,28 +641,22 @@ struct DeepSeekValuationService: ValuationService, @unchecked Sendable {
     /// deliberate departure from the app's own sampling warmth: what comes back is extraction, and a
     /// pallet read twice has to count the same twice. The answer carries the batch's *accounting* as well
     /// as its goods (`ManifestBatchAnswer`), because a frame the batch says nothing about is a product
-    /// the inventory may be short of and only the route can see that.
-    private func manifestBatch(
-        description: String,
-        batch: Int,
-        batchCount: Int,
-        positions: [Int],
-        images: [LotImage],
-        imageCount: Int,
-        evidence: LotImageEvidence
-    ) async throws -> ManifestBatchAnswer {
+    /// the inventory may be short of and only the route can see that. No strict mode exists here, so the
+    /// schema travels as JSON Schema *text* inside the prompt (`Self.embeddedManifestSchema`) — which is
+    /// the whole difference between this conformance and Gemini's.
+    func manifestBatch(_ request: ManifestBatchRequest) async throws -> ManifestBatchAnswer {
         let body = try requestBody(
             systemInstruction: LotManifestPrompt.manifestSystemInstruction,
             prompt: LotManifestPrompt.manifestPrompt(
-                description: description,
-                batch: batch,
-                batchCount: batchCount,
-                positions: positions,
-                imageCount: imageCount,
-                evidence: evidence,
+                description: request.description,
+                batch: request.batch,
+                batchCount: request.batchCount,
+                positions: request.positions,
+                imageCount: request.imageCount,
+                evidence: request.evidence,
                 schemaText: Self.embeddedManifestSchema
             ),
-            images: images,
+            images: request.images,
             // Zero, unlike every other pass on this transport: this is an extraction, and the same pallet
             // read twice must not come back with two different counts (`LotManifestPrompt.manifestTemperature`).
             temperature: LotManifestPrompt.manifestTemperature

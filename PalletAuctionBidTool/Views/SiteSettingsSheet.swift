@@ -44,6 +44,7 @@ struct SiteSettingsSheet: View {
             Divider().opacity(0.6)
             siteSessionRow
             appraiserRow
+            identityRow
             keySections
             readingsRow
             warning
@@ -88,8 +89,9 @@ struct SiteSettingsSheet: View {
             .padding(.vertical, 4)
             .background(tint.opacity(0.12), in: Capsule())
             .help(
-                "Green once the provider appraising lots has a key; each service keeps its own, in its "
-                    + "own section below."
+                "Green once every key the next run needs is set — the appraiser's, and, when a batched "
+                    + "run reads its manifests elsewhere, the identity provider's too. Each service keeps "
+                    + "its own, in its own section below."
             )
     }
 
@@ -142,7 +144,56 @@ struct SiteSettingsSheet: View {
         }
     }
 
-    /// Row three: one section per provider, both always drawn.
+    /// Row three: **who reads a lot's photographs** when the run batches them, which may be somebody
+    /// other than the appraiser (Tier 4).
+    ///
+    /// Drawn always rather than only while it applies, because a preference an operator has read about
+    /// should be findable when they go looking — but inert, and *said* to be inert, while there is no
+    /// manifest to read: the split needs **Appraise with** DeepSeek (Gemini has no batched route) and a
+    /// width in Run Tuning's **Photos / request**, and until both are set no second provider is asked
+    /// for anything (`AppSettings.runsSplitIdentity`).
+    ///
+    /// This is the row that makes the two model menus below mean different things, so its help names
+    /// them: reading a carton's printed code and count off a photograph is a vision job, and pricing
+    /// that code afterwards is a lookup pixels cannot improve.
+    private var identityRow: some View {
+        SettingsFieldRow(label: "Reads manifests") {
+            Picker("Reads manifests", selection: $settings.identityProvider) {
+                ForEach(IdentityProvider.allCases) { choice in
+                    Text(choice.displayName(fallingBackTo: settings.provider)).tag(choice)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(!settings.batchesPhotographs)
+            .help(identityHelp)
+        }
+    }
+
+    /// What the identity picker is for, in the state it is actually in.
+    ///
+    /// Three answers, because the setting has three states and two of them are inert for different
+    /// reasons — a run that does not batch, and a split that has been chosen but is not yet doing
+    /// anything. Naming the row that has to change (*Appraise with*, **Photos / request**) is what makes
+    /// a disabled menu forgivable; see `ManifestService` for the seam itself.
+    private var identityHelp: String {
+        guard settings.batchesPhotographs else {
+            return "Who reads the batches a run sends. Inert for now: only a batched run has a manifest "
+                + "— set Appraise with to DeepSeek and pick a width on Run Tuning's Photos / request row "
+                + "for this to matter."
+        }
+        guard settings.runsSplitIdentity else {
+            return "Who reads the batches a run sends, which is \(settings.provider.displayName) itself "
+                + "today: \(settings.activeModelID) reads each lot's photographs and prices what it read. "
+                + "Naming Gemini instead spends a second key on the reading half — its own section's "
+                + "model is the one that gets the photographs — while the prices keep coming from "
+                + "\(settings.provider.displayName)."
+        }
+        return "\(settings.manifestProvider.displayName) \(settings.manifestModelID) reads each lot's "
+            + "photographs into a manifest; \(settings.provider.displayName) \(settings.activeModelID) "
+            + "prices it. Both keys are needed, and each is sent only its own half."
+    }
+
+    /// Row four: one section per provider, both always drawn.
     ///
     /// A pair rather than one field, so "which keys do I have?" is one glance and "paste the other
     /// one" is one click. The spacing is tighter than `Theme.groupSpacing` because these two read as
@@ -163,6 +214,9 @@ struct SiteSettingsSheet: View {
     private func keySection(_ provider: ValuationProvider) -> some View {
         let armed = settings.provider == provider
         let ready = settings.hasAPIKey(for: provider)
+        // The identity half, when it is this section's provider doing it: the chip is what stops the
+        // model menu below from reading as the appraiser's model when it is in fact the reader's.
+        let readsManifests = settings.runsSplitIdentity && settings.manifestProvider == provider
 
         return VStack(alignment: .leading, spacing: Theme.fieldSpacing) {
             HStack(spacing: 8) {
@@ -177,6 +231,10 @@ struct SiteSettingsSheet: View {
 
                 if armed {
                     Text("appraises lots").chipStyle(tint: .accentColor)
+                }
+
+                if readsManifests {
+                    Text("reads manifests").chipStyle(tint: .accentColor)
                 }
 
                 Spacer(minLength: 8)
@@ -202,7 +260,7 @@ struct SiteSettingsSheet: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .help("Only multimodal models are listed: a scan sends the lot's photographs.")
+                .help(modelHelp(for: provider))
             }
 
             Link(destination: provider.keySignupURL) {
@@ -216,7 +274,24 @@ struct SiteSettingsSheet: View {
         .cardStyle()
     }
 
-    /// Row four: the readings this machine has already paid for.
+    /// What one section's **Model** menu is choosing — which changes meaning when the split is on.
+    ///
+    /// Without a split every model in the app is the appraiser's, so the note is about modality. With
+    /// one, the identity section's model is the model that *reads* and the appraiser's is the one that
+    /// *prices*: two different jobs whose best answers are not the same model, which is the whole reason
+    /// the split exists.
+    private func modelHelp(for provider: ValuationProvider) -> String {
+        guard settings.runsSplitIdentity else {
+            return "Only multimodal models are listed: a scan sends the lot's photographs."
+        }
+        return provider == settings.provider
+            ? "The model that prices each lot from the manifest. The photographs are read by "
+                + "\(settings.manifestProvider.displayName) — see Reads manifests above."
+            : "The model that reads each lot's photographs into its manifest. The prices come back from "
+                + "\(settings.provider.displayName) \(settings.activeModelID)."
+    }
+
+    /// Row five: the readings this machine has already paid for.
     ///
     /// A thorough scan buys an answer about each photograph and keeps it, so re-scanning a lot with the
     /// same model costs the reconciliation rather than the whole gallery — and that only works while the
@@ -270,48 +345,91 @@ struct SiteSettingsSheet: View {
         }
     }
 
-    /// Shown only when the combination is actually a problem: the armed provider has no key, so
+    /// Shown only when the combination is actually a problem: a key the next run needs is not set, so
     /// nothing can be appraised.
     ///
     /// It names the section that needs the key rather than the provider in the abstract — the sheet
     /// has two boxes that look alike, and "paste a DeepSeek API key" is a riddle when neither section
     /// is labelled with that sentence. When the *other* provider already has a key it says so, because
     /// switching appraisers is a one-click answer that needs no key at all.
+    ///
+    /// The split added a second way to be unready, and it is a different fix: a batched run whose
+    /// manifest would be read by a provider with no key can be repaired either by pasting that key or by
+    /// putting the **Reads manifests** row back on *Same as appraiser*, so the note says both. Which of
+    /// the two boxes the key belongs in is not something this view works out — `missingKeyProvider`
+    /// already knows.
+    ///
+    /// The switching hint that follows the other sentence is deliberately absent when the *identity*
+    /// key is the missing one: it answers "which appraiser could run instead", and the appraiser is not
+    /// what is missing.
     @ViewBuilder
     private var warning: some View {
-        if !settings.hasAPIKey {
+        if let missing = settings.missingKeyProvider {
             let standby = settings.providerKeyStates
                 .first { $0.provider != settings.provider && $0.isReady }
             let tail = standby.map {
                 " \($0.provider.displayName) already has one, so Appraise with can switch to it now."
             } ?? ""
 
-            Label(
-                "Nothing can be appraised yet: the \(settings.provider.displayName) section above has "
-                    + "no key." + tail,
-                systemImage: "exclamationmark.triangle"
-            )
+            if settings.runsSplitIdentity && missing == settings.manifestProvider {
+                warningLabel(
+                    "Nothing can be appraised yet: this run would read each lot's photographs on "
+                        + "\(missing.displayName) and price them on \(settings.provider.displayName), and "
+                        + "the \(missing.displayName) section above has no key. Paste one there, or set "
+                        + "Reads manifests to Same as appraiser to read the batches on "
+                        + "\(settings.provider.displayName) itself."
+                )
+            } else {
+                warningLabel(
+                    "Nothing can be appraised yet: the \(missing.displayName) section above has "
+                        + "no key." + tail
+                )
+            }
+        }
+    }
+
+    /// One warning line's chrome, shared by the two sentences above so a note about a missing key looks
+    /// the same whichever half of a split it is about.
+    private func warningLabel(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle")
             .font(.caption)
             .foregroundStyle(.orange)
             .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     private var footnotes: some View {
         Text(
             "Edits apply as you type — there is no Cancel. Keys stay in this Mac's UserDefaults, are sent "
                 + "only to the provider they belong to, and switching between them is lossless."
+                + splitFootnote
         )
         .font(.caption2)
         .foregroundStyle(.tertiary)
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// The sentence a split run adds to the footnote above: which key sees what.
+    ///
+    /// Empty when there is no split, because the footnote already says the lossless thing and a
+    /// paragraph about a setting that is off is how a footnote becomes unread. When there *is* one it
+    /// has to be said plainly — two keys, one run, and each provider is handed only the half it is being
+    /// paid for: the reader its photographs, the appraiser the manifest it prices.
+    private var splitFootnote: String {
+        guard settings.runsSplitIdentity else { return "" }
+        return " With Reads manifests set to \(settings.manifestProvider.displayName), the "
+            + "\(settings.manifestProvider.displayName) key is sent each lot's photographs and the "
+            + "\(settings.provider.displayName) key the manifest they were read into, plus the listing "
+            + "text — neither key sees the other's half, and both are needed before a scan can run."
+    }
+
     // MARK: - Footer
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Text("Appraising with \(settings.provider.displayName) · \(settings.activeModelID)")
+            Text(
+                "Appraising with \(settings.provider.displayName) · \(settings.activeModelID)"
+                    + "\(settings.identityRouteSummary)"
+            )
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(2)

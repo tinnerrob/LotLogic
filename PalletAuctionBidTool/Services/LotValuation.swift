@@ -116,6 +116,14 @@ struct ValuationOutcome: Sendable {
     /// that keeps "every image" honest. Reported, never silently swallowed (see `LotImageLoader`).
     var imagesSkipped: Int = 0
     var modelID: String
+    /// The model that read the lot's **identity** — the manifest its inventory was priced from —
+    /// when that was a different model from `modelID` (`AppSettings.identityProvider`, Tier 4 of
+    /// `docs/manifest-identity-plan.md`). `nil` for every route that reads and prices with one model,
+    /// which is every route but a split batched one.
+    ///
+    /// Carried because it is a fact about how the figure was reached rather than an inference: the
+    /// pricing model's name says nothing about who decided the pallet held six candles.
+    var identityModelID: String?
     /// How many model passes produced `items`: `1` for a single multimodal request (Gemini, or a
     /// DeepSeek lot with no photographs), `2` for DeepSeek's text-then-images pipeline.
     var passes: Int = 1

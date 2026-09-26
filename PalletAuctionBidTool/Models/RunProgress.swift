@@ -99,8 +99,9 @@ enum AppraisalStep: Equatable, Sendable {
     /// here on purpose: see the type's own note on why the readout counts instead of naming one.
     case photograph(answered: Int, of: Int)
 
-    /// The whole gallery is going over in one pass, because reading it photograph by photograph came
-    /// back with nothing readable.
+    /// The whole gallery is going over in one pass: either because reading it photograph by
+    /// photograph came back with nothing readable, or because that is the route **Photos / scan** was
+    /// set to (`AppSettings.wholeGalleryPerScan`), which reaches the same single pass on purpose.
     case wholeGallery
 
     /// The readings are being reconciled into the pallet's line items.

@@ -7,7 +7,9 @@
 //  Retry-After handling, RequestPacer pacing, request shaping and the shared decode can be
 //  checked without a key and without touching the network — the batched manifest route's contract
 //  included: the schema it has to answer in, the cues it is told to weigh, the frames it has to
-//  account for, and the temperature it is asked at. The provider list's own copy is
+//  account for, and the temperature it is asked at. So is the **split** (Tier 4): one provider reading
+//  a lot's batches while another prices the inventory they settle into, with the settings that turn
+//  that on, leave it inert, and find it short of a key. The provider list's own copy is
 //  checked too (where each key comes from, what it costs), because two sheets print it and
 //  neither may drift from the README. Not part of the app target.
 //
@@ -428,10 +430,17 @@ func lotImage(_ bytes: Data, at address: String) -> LotImage {
     )
 }
 
+/// A Gemini transport pointed at `script`'s stub, with a key of its own (`"test-key"`) so a split run's
+/// two halves can be told apart by the credential each request carried.
+///
+/// - Parameter modelID: which model answers. The identity role is why this is a parameter at all: a split
+///   run reads its manifests on whichever model the identity provider's own section names
+///   (`AppSettings.manifestModelID`), which is not the model the appraiser prices on.
 func makeService(
     _ script: StubScript,
     requestsPerMinute: Int,
     maxAttempts: Int,
+    modelID: String = GeminiValuationService.defaultModelID,
     maxImageBytes: Int = 6_000_000,
     maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
     photoScan: PhotoScanPlan = .disabled,
@@ -443,7 +452,7 @@ func makeService(
     configuration.protocolClasses = [StubProtocol.self]
     return GeminiValuationService(
         apiKey: "test-key",
-        modelID: "gemini-2.5-flash",
+        modelID: modelID,
         session: URLSession(configuration: configuration),
         maxImageBytes: maxImageBytes,
         maxTotalImageBytes: maxTotalImageBytes,
@@ -485,24 +494,46 @@ struct StubManifestLine {
     var identifiers: [String] = []
 }
 
-/// A batch's manifest answer, in the schema the batch prompt asks for.
+/// A batch's manifest answer as JSON, in the shape both transports are asked for.
+///
+/// Rendered once and wrapped per transport, because the answer's shape is the one thing a split run must
+/// not let drift: either service may read the frames, and the fold that receives the answer cannot tell
+/// which one wrote it.
 ///
 /// `unread` is the batch's *accounting* rather than its findings: the gallery numbers it declares to show
-/// nothing sellable (`LotManifestPrompt.manifestPrompt`, rule 8). Passed in when a test is about what a
-/// batch did or did not account for.
-func manifestBody(_ lines: [StubManifestLine], unread: [Int]? = nil) -> Data {
+/// nothing sellable (`LotManifestPrompt.manifestPrompt`, rule 8).
+func manifestJSON(_ lines: [StubManifestLine], unread: [Int]? = nil) -> String {
     let rendered = lines.map { line -> String in
         let codes = line.identifiers.map { "\"\($0)\"" }.joined(separator: ",")
         let places = line.views.map(String.init).joined(separator: ",")
         return #"{"itemName":"\#(line.name)","brand":"\#(line.brand)","modelNumber":"\#(line.model)","quantity":\#(line.quantity),"confidence":"\#(line.confidence)","identifiers":[\#(codes)],"views":[\#(places)]}"#
     }
     let accounting = unread.map { ",\"unreadPhotos\":[\($0.map(String.init).joined(separator: ","))]" } ?? ""
-    return chatEnvelope(#"{"manifest":[\#(rendered.joined(separator: ","))]\#(accounting)}"#)
+    return #"{"manifest":[\#(rendered.joined(separator: ","))]\#(accounting)}"#
+}
+
+/// A batch's manifest answer as the **batching** transport hands it back: a `/chat/completions` envelope.
+func manifestBody(_ lines: [StubManifestLine], unread: [Int]? = nil) -> Data {
+    chatEnvelope(manifestJSON(lines, unread: unread))
+}
+
+/// The same batch answer as the **frame-by-frame** transport hands it back: a `:generateContent` envelope.
+///
+/// The split is what this exists for — the identity role filled by Gemini while DeepSeek prices the
+/// manifest — and the envelope is the only difference between the two: one question, one schema, one
+/// answer shape, whichever transport carried it.
+func geminiManifestBody(_ lines: [StubManifestLine], unread: [Int]? = nil) -> Data {
+    generateContentEnvelope(manifestJSON(lines, unread: unread))
 }
 
 /// DeepSeek's 429 envelope: a concurrency ceiling, not a per-minute quota.
 let deepSeekRateLimitBody = Data(#"{"error":{"message":"Rate limit reached for requests","type":"rate_limit_error","code":"rate_limit_exceeded"}}"#.utf8)
 
+/// A DeepSeek transport pointed at `script`'s stub.
+///
+/// - Parameter manifestService: the identity role, when a check is about a **split** run: the frames come
+///   down this transport but are read by that one (`AppSettings.identityProvider`). Left `nil`, the route
+///   is the one it has always been — this transport reading its own batches.
 func makeDeepSeekService(
     _ script: StubScript,
     requestsPerMinute: Int,
@@ -511,6 +542,7 @@ func makeDeepSeekService(
     maxTotalImageBytes: Int = LotImageLoader.defaultTotalBytes,
     photoScan: PhotoScanPlan = .disabled,
     photosPerRequest: Int = 0,
+    manifestService: ManifestService? = nil,
     store: PhotoReadingStore = .shared,
     report: @escaping @Sendable (PhotoScanReport) -> Void = { _ in }
 ) -> DeepSeekValuationService {
@@ -527,6 +559,7 @@ func makeDeepSeekService(
         maxAttempts: maxAttempts,
         photoScan: photoScan,
         photosPerRequest: photosPerRequest,
+        manifestService: manifestService,
         store: store,
         report: report
     )
@@ -1052,7 +1085,8 @@ do {
     check(outcome.imagesSent == 1, "the photo reached the request", detail: "\(outcome.imagesSent)")
     let sent = script.requests.last
     check(
-        sent?.url.absoluteString == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        sent?.url.absoluteString
+            == "https://generativelanguage.googleapis.com/v1beta/models/\(GeminiValuationService.defaultModelID):generateContent",
         "used the documented `:generateContent` method (a slash here returns HTTP 404)",
         detail: sent?.url.absoluteString ?? "—"
     )
@@ -2211,7 +2245,7 @@ do {
         .appendingPathComponent("lotlogic-readings-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = PhotoReadingStore(directory: directory)
-    let plan = PhotoScanPlan.thorough(modelID: "gemini-2.5-flash", concurrency: 1)
+    let plan = PhotoScanPlan.thorough(modelID: GeminiValuationService.defaultModelID, concurrency: 1)
 
     // A whole scan, in the shape the pipeline sends it: every photograph, then the reconciliation.
     do {
@@ -2232,7 +2266,7 @@ do {
         check(outcome.readings.map(\.imageIndex).sorted() == [1, 2],
               "and its position in the gallery",
               detail: "\(outcome.readings.map(\.imageIndex).sorted())")
-        check(outcome.readings.allSatisfy { $0.modelID == "gemini-2.5-flash" },
+        check(outcome.readings.allSatisfy { $0.modelID == GeminiValuationService.defaultModelID },
               "stamped with the model that read it, which is what the store reuses by")
         check(outcome.scanRequests == 3, "one request per photograph plus the reconciliation", detail: "\(outcome.scanRequests)")
         check(outcome.readingsFromStore == 0, "and nothing was reused on a first scan", detail: "\(outcome.readingsFromStore)")
@@ -2241,7 +2275,7 @@ do {
               "from the reconciliation request rather than from the readings",
               detail: outcome.items.first?.itemName ?? "nil")
 
-        let stored = await store.readings(forLot: "307", modelID: "gemini-2.5-flash")
+        let stored = await store.readings(forLot: "307", modelID: GeminiValuationService.defaultModelID)
         check(stored.count == 2, "the readings are on this machine, before the reconciliation is attempted",
               detail: "\(stored.count)")
     } catch {
@@ -2464,7 +2498,7 @@ do {
         script,
         requestsPerMinute: 0,
         maxAttempts: 1,
-        photoScan: PhotoScanPlan.thorough(modelID: "gemini-2.5-flash", concurrency: 1),
+        photoScan: PhotoScanPlan.thorough(modelID: GeminiValuationService.defaultModelID, concurrency: 1),
         store: store
     )
 
@@ -2558,7 +2592,7 @@ do {
             )
         ],
         imagesSent: 2,
-        modelID: "gemini-2.5-flash",
+        modelID: GeminiValuationService.defaultModelID,
         passes: 2
     )
 
@@ -2829,7 +2863,7 @@ do {
             script,
             requestsPerMinute: 0,
             maxAttempts: 1,
-            photoScan: PhotoScanPlan.thorough(modelID: "gemini-2.5-flash", concurrency: 3),
+            photoScan: PhotoScanPlan.thorough(modelID: GeminiValuationService.defaultModelID, concurrency: 3),
             store: PhotoReadingStore(directory: directory),
             report: { log.note($0) }
         )
@@ -3526,9 +3560,11 @@ do {
           detail: "\(ValuationProvider.gemini.keyPlaceholder) / \(ValuationProvider.deepSeek.keyPlaceholder)")
 
     // The row the Account sheet's header and the panel's tooltip both read.
-    let armed = ProviderKeyState(provider: .gemini, isReady: true, modelID: "gemini-2.5-flash")
+    let armed = ProviderKeyState(
+        provider: .gemini, isReady: true, modelID: GeminiValuationService.defaultModelID
+    )
     let idle = ProviderKeyState(provider: .deepSeek, isReady: false, modelID: "deepseek-flash")
-    check(armed.summary == "Gemini · gemini-2.5-flash · key set",
+    check(armed.summary == "Gemini · \(GeminiValuationService.defaultModelID) · key set",
           "a provider with a key reads as key set", detail: armed.summary)
     check(idle.summary == "DeepSeek · deepseek-flash · no key",
           "and one without reads as no key", detail: idle.summary)
@@ -3658,6 +3694,9 @@ do {
     check(userText(in: batchChat).contains("photographs 1-4 of 4 are attached"),
           "and the batch was told which frames it was answering for",
           detail: String(userText(in: batchChat).prefix(120)))
+    check(outcome.identityModelID == nil,
+          "and no second model is recorded, because this transport read its own batches",
+          detail: outcome.identityModelID ?? "none")
 
 } catch {
     tally.bump()
@@ -3823,6 +3862,389 @@ do {
         .flatMap { ($0["items"] as? [String: Any])?["properties"] as? [String: Any] } ?? [:]
     check(lineProperties["countConflict"] == nil, "no batch is ever asked for a count conflict",
           detail: "\(lineProperties.keys.sorted())")
+}
+
+// MARK: - 50. A split run: one provider reads the manifest, another prices it (Tier 4)
+
+do {
+    print("50. A batched lot is read by the identity provider and priced by the appraiser, and the run says which model did which")
+
+    // The whole split, end to end. The stub hands its steps out in the order requests arrive, and that
+    // order is a fact about this route rather than a race: the gallery comes down first (the appraiser is
+    // the transport running the lot), then the one batch is read, and only then does the pricing pass go
+    // out — `manifestRoute` awaits every batch's answer before it prices anything.
+    let script = StubScript([
+        .init(status: 200, body: frameBytes(1), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(2), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(3), headers: ["Content-Type": "image/jpeg"]),
+        .init(status: 200, body: frameBytes(4), headers: ["Content-Type": "image/jpeg"]),
+        // The identity half: the batch's answer, wrapped in the envelope of the transport the identity
+        // role was pointed at. One item seen from two sides, one seen once, and one frame the batch
+        // declares it found nothing sellable in.
+        .init(status: 200, body: geminiManifestBody([
+            StubManifestLine(
+                name: "Yankee Candle 22 oz jar", brand: "Yankee Candle", model: "1631666",
+                quantity: 6, views: [1, 2], identifiers: ["609032993551"]
+            ),
+            StubManifestLine(name: "Energizer MAX AA, 24-pack", brand: "Energizer", quantity: 2, views: [3])
+        ], unread: [4])),
+        .init(status: 200, body: deepSeekSuccessBody) // the pricing pass, text only
+    ])
+    let identity = makeService(
+        script, requestsPerMinute: 0, maxAttempts: 1, modelID: GeminiValuationService.defaultModelID
+    )
+    let pricing = makeDeepSeekService(
+        script, requestsPerMinute: 0, maxAttempts: 1, photosPerRequest: 4, manifestService: identity
+    )
+    let outcome = try await pricing.value(subject: fourPhotoSubject)
+
+    // Who asked whom. Each half is read in its own transport's terms — a request to Google has no
+    // `messages` for the chat helpers to find, and the pricing request has no `inline_data` — which is the
+    // point: the two halves are one question on two wires.
+    let identityCalls = script.requests.filter { $0.url.host == "generativelanguage.googleapis.com" }
+    let pricingCalls = script.requests.filter { $0.url.host == "api.deepseek.com" }
+    let identityCall = identityCalls.first
+    let pricingCall = pricingCalls.first
+
+    check(identityCalls.count == 1, "the batch was read in one request", detail: "\(identityCalls.count)")
+    check(pricingCalls.count == 1, "and the inventory priced in one", detail: "\(pricingCalls.count)")
+    check(identityCall?.url.absoluteString
+            == "https://generativelanguage.googleapis.com/v1beta/models/\(GeminiValuationService.defaultModelID):generateContent",
+          "read on the model the identity section names rather than the appraiser's",
+          detail: identityCall?.url.absoluteString ?? "none")
+    check(identityCall?.headers["x-goog-api-key"] == "test-key",
+          "and paid for with the Gemini key", detail: identityCall?.headers["x-goog-api-key"] ?? "none")
+    check(pricingCall?.headers["Authorization"] == "Bearer sk-test-key",
+          "while the pricing request carries the DeepSeek key",
+          detail: pricingCall?.headers["Authorization"] ?? "none")
+
+    check(geminiImages(in: identityCall).count == 4,
+          "every frame of the batch travelled to the identity half",
+          detail: "\(geminiImages(in: identityCall).count)")
+    check(imageURLs(in: pricingCall).isEmpty, "and the appraiser priced it without one photograph")
+
+    // The question is the batcher's own, word for word, which is what lets one fold read either
+    // provider's answer: only the envelope around it differs.
+    let asked = geminiText(in: identityCall)
+    check(asked.contains("photographs 1-4 of 4 are attached"),
+          "the batch was told which gallery frames it holds", detail: String(asked.prefix(140)))
+    check(asked.contains("Pallet of candles and batteries")
+            && asked.contains("Account for every photograph attached"),
+          "and given the scraped listing with the rule that makes every frame its business",
+          detail: String(asked.prefix(140)))
+    let identityParts = (identityCall?.json["system_instruction"] as? [String: Any])?["parts"] as? [[String: Any]] ?? []
+    let identityInstruction = identityParts.compactMap { $0["text"] as? String }.joined()
+    check(identityInstruction.contains("cataloguing ONE liquidation-auction pallet"),
+          "with the manifest instruction the batcher's own route sends, so the two halves cannot be told different questions",
+          detail: String(identityInstruction.prefix(140)))
+
+    // The one structural difference between the halves: this transport enforces the answer's shape rather
+    // than describing it in the prompt, which is the reason a split is worth having at all.
+    let config = identityCall?.json["generation_config"] as? [String: Any]
+    check(config?["response_mime_type"] as? String == "application/json",
+          "JSON is pinned as the answer's mime type")
+    let enforced = config?["response_schema"] as? [String: Any]
+    check(enforced?["required"] as? [String] == ["manifest"],
+          "the manifest schema travels as `response_schema`, so the shape is the API's business",
+          detail: "\(enforced?["required"] ?? [])")
+    let enforcedLine = ((enforced?["properties"] as? [String: Any])?["manifest"] as? [String: Any])
+        .flatMap { ($0["items"] as? [String: Any])?["required"] as? [String] }
+    check(enforcedLine?.contains("views") == true,
+          "including the field that makes a line a sighting rather than a guess",
+          detail: "\(enforcedLine ?? [])")
+    check(!asked.contains("additionalProperties")
+            && LotManifestPrompt.manifestSchema.jsonSchemaText.contains("additionalProperties"),
+          "and no schema text is written into the prompt, where the transport that cannot enforce it must describe it")
+    check(config?["temperature"] as? Double == 0.0,
+          "the batch was asked cold, because reading a pallet is extraction rather than judgement",
+          detail: "\(config?["temperature"] ?? "none")")
+    check(pricingCall?.json["temperature"] as? Double == 0.2,
+          "while the pass that prices what it read keeps the app's ordinary warmth",
+          detail: "\(pricingCall?.json["temperature"] ?? "none")")
+
+    // What the run records, and what it read: two models named, one inventory, and the fold that turned one
+    // provider's answer into the other provider's prompt.
+    check(outcome.modelID == "deepseek-flash", "the outcome is priced by the appraiser", detail: outcome.modelID)
+    check(outcome.identityModelID == GeminiValuationService.defaultModelID,
+          "and says which model read the inventory it priced", detail: outcome.identityModelID ?? "none")
+    check(outcome.passes == 2, "two passes produced the figures: one batch read, one price",
+          detail: "\(outcome.passes)")
+
+    let manifest = outcome.manifest ?? PalletManifest()
+    check(manifest.count == 2, "the batch folded into two items", detail: "\(manifest.count)")
+    check(manifest.unitCount == 8, "accounting for six candles and two packs", detail: "\(manifest.unitCount)")
+    check(manifest.items.first?.views == [1, 2], "with the photographs each sighting came from",
+          detail: "\(manifest.items.first?.views ?? [])")
+    check(manifest.items.first?.modelNumber == "1631666", "and the model number read off the pack")
+    check(manifest.unreadFrames == [4],
+          "the frame the batch declared empty kept as its own account of it",
+          detail: "\(manifest.unreadFrames)")
+    check(userText(in: pricingCall).contains("1631666"),
+          "and that inventory is what the pricing prompt carries, so the appraiser prices what was read",
+          detail: String(userText(in: pricingCall).prefix(140)))
+
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
+}
+
+/// Settings for one shape of a split, built on a scratch defaults domain so that nothing a check writes
+/// here outlives it — and so that a machine which has already chosen an identity provider cannot decide
+/// what the harness measures.
+///
+/// Every field the split reads is set explicitly rather than left to the defaults, because the point of
+/// these checks is the *rule* (`AppSettings.runsSplitIdentity`, `missingKeyProvider`), not the fallbacks.
+@MainActor
+func splitSettings(
+    appraiser: ValuationProvider,
+    identity: IdentityProvider,
+    photosPerRequest: Int,
+    geminiKey: String = "test-key",
+    deepSeekKey: String = "sk-test-key",
+    geminiModel: String = GeminiValuationService.defaultModelID,
+    deepSeekModel: String = "deepseek-flash"
+) -> AppSettings {
+    let name = "free-tier-harness.split"
+    let defaults = UserDefaults(suiteName: name)!
+    defaults.removePersistentDomain(forName: name)
+    let settings = AppSettings(defaults: defaults)
+    settings.provider = appraiser
+    settings.identityProvider = identity
+    settings.photosPerRequest = photosPerRequest
+    settings.apiKey = geminiKey
+    settings.deepSeekAPIKey = deepSeekKey
+    settings.modelID = geminiModel
+    settings.deepSeekModelID = deepSeekModel
+    return settings
+}
+
+// MARK: - 50b. When the split is inert, and when it is short a key (Tier 4)
+
+do {
+    print("50b. The identity role only means something to a run that has batches to hand over, and both halves have to be paid for")
+
+    // Batching on with two providers named: the one shape that is a split.
+    let split = splitSettings(appraiser: .deepSeek, identity: .gemini, photosPerRequest: 4)
+    check(split.runsSplitIdentity, "a batched DeepSeek run told to read its manifest on Gemini is a split")
+    check(split.manifestProvider == .gemini
+            && split.manifestModelID == GeminiValuationService.defaultModelID,
+          "the identity half runs on its own section's provider and model",
+          detail: "\(split.manifestProvider.displayName) \(split.manifestModelID)")
+    check(split.activeModelID == "deepseek-flash",
+          "so the reading half is bought on its own key without moving the price",
+          detail: split.activeModelID)
+    check(split.identityRouteSummary == ", manifest read on Gemini \(GeminiValuationService.defaultModelID)",
+          "and the run log can say who read the manifest", detail: split.identityRouteSummary)
+    check(split.hasAPIKey && split.missingKeyProvider == nil, "both keys present, so a row can be scanned")
+
+    // *Same as appraiser* is the state every install is in: the appraiser reads its own batches.
+    let same = splitSettings(appraiser: .deepSeek, identity: .same, photosPerRequest: 4)
+    check(!same.runsSplitIdentity && same.manifestProvider == .deepSeek,
+          "left on Same as appraiser, the appraiser reads its own batches however strong the other model is")
+    check(same.identityRouteSummary.isEmpty,
+          "and no console line grows a clause about a role nobody filled", detail: same.identityRouteSummary)
+
+    // Photos / request off: there is no manifest to hand over, so the role is inert rather than pending.
+    let unbatched = splitSettings(appraiser: .deepSeek, identity: .gemini, photosPerRequest: 0)
+    check(!unbatched.batchesPhotographs && !unbatched.runsSplitIdentity,
+          "with Photos / request off there is no batch to be read, so naming Gemini changes nothing")
+    check(unbatched.identityRouteSummary.isEmpty, "and the log stays quiet about it",
+          detail: unbatched.identityRouteSummary)
+
+    // Gemini appraises frame by frame and has no manifest pass: nothing the setting says can make it batch.
+    let geminiAppraiser = splitSettings(appraiser: .gemini, identity: .gemini, photosPerRequest: 4)
+    check(!geminiAppraiser.batchesPhotographs && !geminiAppraiser.runsSplitIdentity,
+          "a Gemini-priced run never batches, so one provider does both jobs whatever Photos / request says",
+          detail: geminiAppraiser.photoRouteSummary)
+
+    // The two keys: a split run buys two things, and the second one can be the one that is missing.
+    let keylessIdentity = splitSettings(
+        appraiser: .deepSeek, identity: .gemini, photosPerRequest: 4, geminiKey: ""
+    )
+    check(keylessIdentity.missingKeyProvider == .gemini,
+          "a split run whose identity provider has no key names that provider as the gap")
+    check(keylessIdentity.missingKeyPhrase == "a Gemini key (the manifest half)",
+          "and says which half of the purchase the missing key was going to pay for",
+          detail: keylessIdentity.missingKeyPhrase)
+    check(!keylessIdentity.hasAPIKey, "which makes the run exactly as unready as one with no key at all")
+
+    // The same missing key in a run that would never buy the identity half is not a gap.
+    let unsplitKeyless = splitSettings(appraiser: .deepSeek, identity: .same, photosPerRequest: 4, geminiKey: "")
+    check(unsplitKeyless.missingKeyProvider == nil && unsplitKeyless.hasAPIKey,
+          "while the same missing key is no gap for a run that spends nothing with that provider")
+
+    // And the appraiser's own key is asked for first, with no role phrase on it.
+    let keylessAppraiser = splitSettings(
+        appraiser: .deepSeek, identity: .gemini, photosPerRequest: 4, deepSeekKey: ""
+    )
+    check(keylessAppraiser.missingKeyProvider == .deepSeek && keylessAppraiser.missingKeyPhrase == "a DeepSeek key",
+          "a missing appraiser key is named first and without a role, because every route needs it",
+          detail: keylessAppraiser.missingKeyPhrase)
+    check(keylessAppraiser.missingKeyRolePhrase(for: .gemini) == " (the manifest half)",
+          "and the manifest half still has its phrase for the other surface to use",
+          detail: keylessAppraiser.missingKeyRolePhrase(for: .gemini))
+}
+
+// MARK: - 50c. A stored model ID the menu no longer offers (retirement)
+
+/// A whole series can be retired between two launches — that is how `gemini-2.5-flash` and the
+/// `gemini-2.5-pro` the identity role used to name went — and a preference file outlives the menu that
+/// wrote it. Serving that string would send `:generateContent` to a model that no longer answers, on
+/// the first scan of every lot, with the operator's only visible setting looking correct;
+/// `AppSettings.modelID(for:)` is the one place every surface reads a model through, so it is also the
+/// one place the retirement rule can live. What is asserted here is that rule, both halves: a model
+/// outside `availableModelIDs` is served as the current default, and one inside it is served as stored.
+@MainActor
+func retiredModelSettings(_ stored: String) -> AppSettings {
+    let name = "free-tier-harness.retired-model"
+    let defaults = UserDefaults(suiteName: name)!
+    defaults.removePersistentDomain(forName: name)
+    defaults.set("deepseek", forKey: "valuationProvider")
+    defaults.set("gemini", forKey: "identityProvider")
+    defaults.set(4, forKey: "photosPerRequest")
+    defaults.set("sk-test-key", forKey: "deepSeekAPIKey")
+    defaults.set("test-key", forKey: "geminiAPIKey")
+    defaults.set(stored, forKey: "geminiModelID")
+    return AppSettings(defaults: defaults)
+}
+
+do {
+    print("50c. A stored model ID no longer on the menu is served as the current default")
+
+    // The preference file of the build whose menu offered 2.5, opened by this one.
+    let legacy = retiredModelSettings("gemini-2.5-flash")
+    check(legacy.modelID == "gemini-2.5-flash",
+          "the string an older build wrote is still where it left it, untouched",
+          detail: legacy.modelID)
+    check(legacy.modelID(for: .gemini) == GeminiValuationService.defaultModelID,
+          "but a retired model is never the model its section names",
+          detail: legacy.modelID(for: .gemini))
+    check(legacy.providerKeyStates.first { $0.provider == .gemini }?.modelID
+            == GeminiValuationService.defaultModelID,
+          "and the Account tooltip's own row agrees with the picker above it, since both read one place")
+
+    // The identity half is a second read of the same rule: a split set up while `-pro` was current must
+    // not keep reading manifests on a model that has been retired, and the log must not name one.
+    check(legacy.runsSplitIdentity && legacy.manifestProvider == .gemini,
+          "a split configured before the retirement is still a split",
+          detail: legacy.providerKeyStates.first { $0.provider == .gemini }?.modelID ?? "—")
+    check(legacy.manifestModelID == GeminiValuationService.defaultModelID,
+          "and its reader is the current model rather than the one it was pointed at",
+          detail: legacy.manifestModelID)
+    check(!legacy.identityRouteSummary.contains("2.5"),
+          "so no console line can name a retired model",
+          detail: legacy.identityRouteSummary)
+
+    // The other half of the rule: the fallback cannot swallow a real choice, or the picker would draw one
+    // model and every run would use another the moment the menu offers more than one again.
+    let chosen = retiredModelSettings(GeminiValuationService.availableModelIDs[0])
+    check(chosen.modelID(for: .gemini) == GeminiValuationService.availableModelIDs[0],
+          "while a model the menu does offer is served exactly as it was stored",
+          detail: chosen.modelID(for: .gemini))
+    check(chosen.modelID(for: .gemini) == chosen.modelID,
+          "and the stored property is left as the picker wrote it")
+}
+
+// MARK: - 50d. Photos / scan: the whole gallery in one request
+
+/// The settings an install has after **Photos / scan** was set to `stored`, read back through the same
+/// `AppSettings(defaults:)` a launch uses — so what is asserted is the *stored preference* and its
+/// clamped reading, not the object this file happened to build.
+///
+/// One value at a time and nothing else set, because the marker has to be told apart from a count that
+/// was never written: an unset key and a deliberate `0` both have to read as "every photograph".
+@MainActor
+func photosPerScanSettings(_ stored: Int) -> AppSettings {
+    let name = "free-tier-harness.photos-per-scan"
+    let defaults = UserDefaults(suiteName: name)!
+    defaults.removePersistentDomain(forName: name)
+    defaults.set(stored, forKey: "photosPerScan")
+    return AppSettings(defaults: defaults)
+}
+
+do {
+    print("50d. Photos / scan: the whole gallery travels in ONE request")
+
+    // The choice itself: the marker is the route, it is *not* the default in disguise, and it survives
+    // the clamp that turns every other value into a count.
+    let whole = photosPerScanSettings(AppSettings.wholeGalleryPerScan)
+    check(whole.readsWholeGalleryInOneRequest,
+          "the marker reads back as the whole-gallery route",
+          detail: whole.photoScanSummary)
+    check(!whole.readsEveryPhotograph,
+          "and none of the gallery is read one at a time, rather than all of it",
+          detail: whole.photoScanSummary)
+    check(whole.effectivePhotosPerScan == AppSettings.wholeGalleryPerScan,
+          "the negative marker is not eaten by the clamp that every count goes through",
+          detail: "\(whole.effectivePhotosPerScan)")
+    check(whole.photoScanSummary == "the whole gallery in one request",
+          "the line the operator reads names the route", detail: whole.photoScanSummary)
+    check(whole.photoRouteSummary == whole.photoScanSummary,
+          "and is never followed by \"read one at a time\", which is the route it replaced",
+          detail: whole.photoRouteSummary)
+    check(!whole.photoScanPlan().isEnabled,
+          "so the plan is the single pass rather than a scan with nothing to read")
+
+    // The marker is not a count: the menu's arithmetic stays over counts, and the sheet draws this
+    // entry itself, so a negative can never reach a ceiling comparison.
+    check(!AppSettings.photoScanChoices.contains(AppSettings.wholeGalleryPerScan)
+            && AppSettings.photoScanChoices.allSatisfy { $0 >= 0 },
+          "the marker stays out of the counts the menu is built from",
+          detail: AppSettings.photoScanChoices.map(String.init).joined(separator: ", "))
+
+    // Both ends of the setting still mean what they did, and a hand-edited preference file cannot
+    // invent a third route: a count is clamped, and a negative that is not the marker is the default.
+    let all = photosPerScanSettings(0)
+    check(all.readsEveryPhotograph && all.photoScanSummary == "every photograph",
+          "0 still reads every photograph one at a time", detail: all.photoRouteSummary)
+    let twelve = photosPerScanSettings(12)
+    check(twelve.effectivePhotosPerScan == 12 && !twelve.readsEveryPhotograph
+            && !twelve.readsWholeGalleryInOneRequest,
+          "a count is still a ceiling", detail: twelve.photoScanSummary)
+    check(photosPerScanSettings(9_999).effectivePhotosPerScan == AppSettings.maximumPhotosPerScan,
+          "a count past the maximum is still clamped to it")
+    check(photosPerScanSettings(-2).readsEveryPhotograph,
+          "and a negative that is not the marker reads as the default, not as the marker",
+          detail: photosPerScanSettings(-2).photoScanSummary)
+
+    // The choice has to survive a relaunch, which is what the load path above is for.
+    let name = "free-tier-harness.photos-per-scan.round-trip"
+    let defaults = UserDefaults(suiteName: name)!
+    defaults.removePersistentDomain(forName: name)
+    var roundTrip = AppSettings(defaults: defaults)
+    roundTrip.photosPerScan = AppSettings.wholeGalleryPerScan
+    roundTrip.persist()
+    check(AppSettings(defaults: defaults).readsWholeGalleryInOneRequest,
+          "and the choice is still there the next morning")
+
+    // On the wire: what choosing it buys. The settings hand the service `.disabled`, so the gallery
+    // travels in one request — every frame of it, not a sample of it, and no reconciliation.
+    let script = StubScript(galleryImageSteps + [.init(status: 200, body: successBody)])
+    let service = makeService(
+        script, requestsPerMinute: 0, maxAttempts: 1, photoScan: whole.photoScanPlan()
+    )
+    let outcome = try await service.value(subject: gallerySubject)
+    let frames = gallerySubject.imageURLs.count
+
+    check(script.requests.count == frames + 1,
+          "\(frames) frames downloaded and ONE appraisal request issued",
+          detail: "\(script.requests.count) request(s)")
+    check(geminiImages(in: script.requests.last).count == frames,
+          "every photograph the lot holds is an inline_data part of that one body",
+          detail: "\(geminiImages(in: script.requests.last).count) of \(frames)")
+    check(outcome.imagesSent == frames && outcome.imagesSkipped == 0,
+          "the outcome agrees with the body: all of them sent, none over the budget",
+          detail: "\(outcome.imagesSent) sent, \(outcome.imagesSkipped) skipped")
+    check(outcome.passes == 1,
+          "one pass for the lot — no per-photograph asks, so nothing to reconcile",
+          detail: "\(outcome.passes)")
+    check(outcome.readings.isEmpty && outcome.groupedViews.isEmpty,
+          "and no readings behind it, which is the trade the entry names",
+          detail: "\(outcome.readings.count) reading(s), \(outcome.groupedViews.count) view(s)")
+    check(outcome.items.count == 1, "the one answer prices the lot", detail: "\(outcome.items.count)")
+} catch {
+    tally.bump()
+    print("  FAIL  unexpected error: \(error)")
 }
 
 print(tally.value == 0 ? "\nALL CHECKS PASSED" : "\n\(tally.value) CHECK(S) FAILED")

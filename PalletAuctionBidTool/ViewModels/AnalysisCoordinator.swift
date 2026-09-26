@@ -209,8 +209,56 @@ final class AnalysisCoordinator {
                 requestsPerMinute: settings.requestsPerMinute,
                 photoScan: plan,
                 photosPerRequest: settings.effectivePhotosPerRequest,
+                manifestService: manifestReader(for: settings, report: report),
                 report: report
             )
+        }
+    }
+
+    /// The transport that reads a batched run's manifest, when the operator pointed the identity role at
+    /// somebody other than the appraiser (Tier 4; `AppSettings.identityProvider`).
+    ///
+    /// `nil` is this app's way of saying *the appraiser reads its own batches* — the state of
+    /// `IdentityProvider.same`, and of `IdentityProvider.deepSeek` on a DeepSeek-priced run — and the
+    /// DeepSeek service reads `nil` as exactly that, batching through its own pass (see
+    /// `DeepSeekValuationService.manifestService`). So the split changes *who is asked* and nothing else:
+    /// the prices stay on the cheap text model while the photographs go to the one that reads a carton
+    /// best.
+    ///
+    /// Only the batched route has a manifest at all, so this is built in the DeepSeek branch and nowhere
+    /// else — a Gemini-priced run never reaches it, because `AppSettings.batchesPhotographs` is false
+    /// while Gemini is the appraiser. Gating on `runsSplitIdentity` is what keeps a DeepSeek run with
+    /// batching off (or with the identity role left on *Same as appraiser*) from building a second
+    /// service it would never call.
+    ///
+    /// The Gemini identity service is built with the **identity** model ID and its **own** pacer: the two
+    /// halves are two purchases, so each is held to the rate its own key's quota deserves — one shared
+    /// pacer would make a Gemini request wait on DeepSeek's clock and the other way round.
+    ///
+    /// The scan reporter travels with it for the reason it travels with the appraiser: a report is about
+    /// the row being read, not about which key paid for the reading. Nothing on the batched manifest path
+    /// reports yet, so this is symmetry rather than traffic.
+    private static func manifestReader(
+        for settings: AppSettings,
+        report: @escaping @Sendable (PhotoScanReport) -> Void
+    ) -> ManifestService? {
+        guard settings.runsSplitIdentity else { return nil }
+        switch settings.manifestProvider {
+        case .gemini:
+            // `photoScan` is left at its `.disabled` default on purpose: the per-photograph plan is the
+            // route the batches displaced, and a manifest reader is only ever asked for `manifestBatch`.
+            return GeminiValuationService(
+                apiKey: settings.apiKey,
+                modelID: settings.manifestModelID,
+                requestsPerMinute: settings.requestsPerMinute,
+                report: report
+            )
+        case .deepSeek:
+            // Unreachable through the setting — it would mean the identity role and the appraiser are the
+            // same provider, which `runsSplitIdentity` already rejects — but `IdentityProvider` says it is
+            // a possibility, so it answers here rather than in a `default:` that would swallow a case
+            // added later.
+            return nil
         }
     }
 
@@ -663,9 +711,10 @@ final class AnalysisCoordinator {
         phase = .scraping
         statusText = "Opening \(url.host() ?? url.absoluteString)"
         log("Run started — \(url.absoluteString) (\(settings.pageLimitSummary))")
-        if !settings.hasAPIKey {
+        if let missing = settings.missingKeyProvider {
             log(
-                "No \(settings.provider.displayName) key yet — lots will load, but scanning a row needs one.",
+                "No \(missing.displayName) key yet\(settings.missingKeyRolePhrase(for: missing)) — lots "
+                    + "will load, but scanning a row needs one.",
                 source: .error
             )
         }
@@ -778,9 +827,12 @@ final class AnalysisCoordinator {
                 canScan
                     ? "\(lots.count) lot(s) loaded — press Eval for a text-only estimate or Price "
                         + "for photographs (or either all-lots button) to appraise with "
-                        + "\(settings.activeModelID)\(pacingSuffix(for: settings))"
-                    : "\(lots.count) lot(s) loaded — add a \(settings.provider.displayName) key to "
-                        + "scan a row"
+                        + "\(settings.activeModelID)"
+                        // A split run reads its manifests elsewhere; the console says so *before* the
+                        // first button, so the model named above is not mistaken for the one that will
+                        // read the photographs.
+                        + "\(settings.identityRouteSummary)\(pacingSuffix(for: settings))"
+                    : "\(lots.count) lot(s) loaded — add \(settings.missingKeyPhrase) to scan a row"
             )
 
             if Task.isCancelled {
@@ -949,9 +1001,11 @@ final class AnalysisCoordinator {
         beginAppraisal(kind: .price, lotIDs: [lot.id], isBatch: false)
         phase = .valuing
         statusText = "Appraising lot \(lot.lotNumber) with \(settings.activeModelID)"
+            + "\(settings.identityRouteSummary)"
         log(
             "Scanning lot \(lot.lotNumber) — \(settings.provider.displayName) "
                 + "\(settings.activeModelID), \(settings.photoRouteSummary) on its lot page"
+                + "\(settings.identityRouteSummary)"
         )
 
         scanTasks[lot.id] = Task { @MainActor [weak self] in
@@ -1362,7 +1416,9 @@ final class AnalysisCoordinator {
             return false
         }
         guard settings.hasAPIKey else {
-            let message = "Add a \(settings.provider.displayName) API key behind the gear (⌘,), then scan again."
+            // `missingKeyPhrase` names the provider *and*, on a split run, which half of it the key was
+            // for — so a second key field behind the gear does not make this note ambiguous.
+            let message = "Add \(settings.missingKeyPhrase) behind the gear (⌘,), then scan again."
             statusText = message
             log(message, source: .error)
             return false
@@ -1602,7 +1658,11 @@ final class AnalysisCoordinator {
                 + "\(lot.totalRetail.currencyWholeText), resale \(lot.totalResale.currencyWholeText), "
                 + imagesPhrase(for: outcome)
                 + "\(outcome.passes > 1 ? " in \(outcome.passes) passes" : "") "
-                + "via \(outcome.modelID)",
+                // Both hands, when two did the work: this is the one line that says what the figures rest
+                // on, and a split run's answer is priced by one model and read by another (Tier 4). The
+                // clause is absent unless `identityModelID` was set, which only the batched route does.
+                + "via \(outcome.modelID)"
+                + (outcome.identityModelID.map { " and \($0) (manifest)" } ?? ""),
             source: .valuation
         )
         statusText = appraisalTally()

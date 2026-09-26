@@ -57,7 +57,8 @@ struct RunTuningSheet: View {
                 .truncationMode(.middle)
                 .help(
                     "The run this sheet describes: how far it walks, how hard it is allowed to push "
-                        + "the key, and how much of a lot's gallery a scan reads one frame at a time."
+                        + "the key, and how a lot's gallery is read — the whole gallery in one "
+                        + "request, one frame at a time, or in batches."
                 )
         }
     }
@@ -74,7 +75,8 @@ struct RunTuningSheet: View {
     // MARK: - Run limits
 
     /// The run's limits: how far a run walks, how fast it is allowed to call out, then how a lot's
-    /// photographs are read — batched a few frames at a time, or one at a time.
+    /// photographs are read — the whole gallery in one request, batched a few frames at a time, or one
+    /// at a time.
     ///
     /// Stacked one field per line, as they were in the card: the captions land at one x position, so
     /// the sheet can be read down a column, and the rest of the width is left to each control
@@ -117,11 +119,17 @@ struct RunTuningSheet: View {
     /// photographs still travel with the reconciliation request, so a ceiling makes the line items
     /// coarser, never the pallet smaller.
     ///
+    /// The first entry is the other end of that trade and the only way to make a lot cost **one**
+    /// request (`AppSettings.wholeGalleryPerScan`): the whole gallery travels in a single body, which
+    /// buys a per-minute quota a forty-frame lot and gives up the per-frame readings with it. It is
+    /// listed first because it is the cheapest thing on the menu and the counts only get dearer.
+    ///
     /// Disabled while DeepSeek is reading the gallery in batches, because that route *is* this one's
     /// replacement on that transport and a setting that did nothing while a run batched would be a
     /// control that lies.
     private var photoScanPicker: some View {
         Picker("Photos / scan", selection: $settings.photosPerScan) {
+            Text(wholeGalleryLabel).tag(AppSettings.wholeGalleryPerScan)
             Text(everyPhotographLabel).tag(0)
             ForEach(AppSettings.photoScanChoices.filter { $0 > 0 }, id: \.self) { count in
                 Text("\(count) photographs").tag(count)
@@ -153,6 +161,9 @@ struct RunTuningSheet: View {
     /// What the menu calls "read each photograph on its own".
     private var everyPhotographLabel: String { "All photographs" }
 
+    /// What the menu calls the one-request route: every frame the payload holds, in a single call.
+    private var wholeGalleryLabel: String { "Whole gallery (one request)" }
+
     /// What the batching menu calls the per-photograph route.
     private var batchOffLabel: String { "Off (one at a time)" }
 
@@ -161,7 +172,12 @@ struct RunTuningSheet: View {
             + "items. \(everyPhotographLabel) is what the app defaults to and what the prices are "
             + "worth checking against: each reading names what one frame showed, so a figure can be "
             + "traced back to a picture. Readings are kept on this machine, so re-scanning a lot with "
-            + "the same model only pays for the photographs it has never seen. DeepSeek reads a gallery "
+            + "the same model only pays for the photographs it has never seen. "
+            + "\(wholeGalleryLabel) sends the gallery in ONE request instead — one call per lot "
+            + "whatever its gallery size, for a metered key — which also means no frame-by-frame "
+            + "readings and no trail from a figure back to a picture, and only the frames that fit "
+            + "the request's inline budget; any it leaves out are counted on the row rather than "
+            + "dropped. DeepSeek reads a gallery "
             + "in batches instead — that is what Photos / request is for — which is why this row is "
             + "unavailable while it does."
     }
@@ -174,6 +190,19 @@ struct RunTuningSheet: View {
             + "show the same carton are read together, so it is counted once. \(batchOffLabel) reads each "
             + "photograph on its own instead (Photos / scan). Gemini always reads frame by frame and "
             + "ignores this row."
+            + manifestReaderTail
+    }
+
+    /// Who actually receives the batches this row sizes, which is DeepSeek unless Account says otherwise.
+    ///
+    /// Two facts belong here because this row *is* the batching switch: a run that batches on one
+    /// provider and prices on another is set up in two sheets, and an operator reading this menu is
+    /// exactly the person who needs to know that the frames they just sized are going somewhere else.
+    private var manifestReaderTail: String {
+        guard settings.runsSplitIdentity else { return "" }
+        return " This run's batches are read by \(settings.manifestProvider.displayName) "
+            + "\(settings.manifestModelID) — see Reads manifests in Account — and priced by "
+            + "\(settings.provider.displayName) \(settings.activeModelID)."
     }
 
     /// The page budget as a menu of counts rather than a stepper: a listing can be longer than any

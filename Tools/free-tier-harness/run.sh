@@ -21,6 +21,9 @@ swiftc -swift-version 6 -o "$out/harness" \
     "$root/PalletAuctionBidTool/Models/BidTargeting.swift" \
     "$root/PalletAuctionBidTool/Models/ColumnWidths.swift" \
     "$root/PalletAuctionBidTool/Models/ColumnVisibility.swift" \
+    "$root/PalletAuctionBidTool/Models/ScrapeLimits.swift" \
+    "$root/PalletAuctionBidTool/Models/ScraperCredentials.swift" \
+    "$root/PalletAuctionBidTool/Models/AppSettings.swift" \
     "$root/PalletAuctionBidTool/Models/LotSearch.swift" \
     "$root/PalletAuctionBidTool/Models/LotSelection.swift" \
     "$root/PalletAuctionBidTool/Models/LotSort.swift" \
@@ -37,6 +40,7 @@ swiftc -swift-version 6 -o "$out/harness" \
     "$root/PalletAuctionBidTool/Services/LotPhotoScan.swift" \
     "$root/PalletAuctionBidTool/Services/LotPhotoScanPrompt.swift" \
     "$root/PalletAuctionBidTool/Services/LotManifestPrompt.swift" \
+    "$root/PalletAuctionBidTool/Services/ManifestService.swift" \
     "$root/PalletAuctionBidTool/Services/PhotoReadingStore.swift" \
     "$root/PalletAuctionBidTool/Services/GeminiValuationService.swift" \
     "$root/PalletAuctionBidTool/Services/DeepSeekValuationService.swift" \

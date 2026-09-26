@@ -3,7 +3,9 @@
 **Status:** Tier 1 (A–D) is implemented and green — `xcodebuild … CODE_SIGNING_ALLOWED=NO` builds and
 `Tools/free-tier-harness/run.sh` passes with checks 44–46 added. **Tier 2 (E–G) is implemented too —
 harness check 48** — see *Tier 2* below for what it came to. **Tier 3 (H) is implemented as well —
-harness check 49** — see *Tier 3* below. **Tier 4 (I, credentials, J) is still to do.**
+harness check 49** — see *Tier 3* below. **Tier 4's provider split (I) and the credentials work it needs
+are implemented too — harness checks 50 and 50b** — see *Tier 4* below for what it came to; part **J**
+(surfacing the duplicates a merge could not settle) is **still to do**.
 Each tier lands behind a green build and a green harness run before the next begins.
 
 **What Tier 1 actually came to, against the plan below.** A: the route groups the gallery before it
@@ -21,6 +23,24 @@ item's identifiers. C: `labelText` on `LotImageEvidence`, filled by `labelLines(
 required to agree. Harness: 44 (the route's picture fold), 45 (the identity questions, unit and end to
 end), 46 (the wording filter and its prompt line). README: deviation 35 added, and deviation 33's fold
 paragraph rewritten where it described the old name-and-number fold.
+
+**What Tier 4's split actually came to, against the plan below.** The seam is `ManifestService` plus
+`ManifestBatchRequest` (the whole of a batch question as a value, so the two transports cannot drift about
+what a batch is told), both transports conform, and `DeepSeekValuationService` takes an optional
+`manifestService` whose `nil` *is* the old route. Three things the plan did not name: `ValuationOutcome
+.identityModelID` (how the run says which model read the inventory it priced, `nil` wherever the model that
+priced the lot read it too), `AppSettings.runsSplitIdentity` (the rule — batching on *and* a different
+provider named — which is what keeps an inert setting from looking broken), and
+`missingKeyRolePhrase(for:)` / `missingKeyPhrase` (a split run buys two things, so the readiness note and
+the console have to be able to say *"a Gemini key (the manifest half)"*). `IdentityProvider.deepSeek` is a
+case of its own rather than folded into `.same`, so the choice survives switching **Appraise with** to
+Gemini and back, and `identityRouteSummary` states the second model once, in one place, for every call
+site that prints it (the console's loading, settled and cancelled lines and the Account sheet's footer),
+while the panel's tooltip words its own clause from the same two facts. Harness: 50 (the split end to end,
+two stub hosts and both keys) and 50b (its three inert states and its two key truths), plus an assertion in
+38 that an unsplit route records no identity model at all. README: deviation 39 added, and the
+architecture tree, the setup steps, "How one scan works", the cost tables, the Account sheet's
+description, the session/credentials table and the troubleshooting table all name the split.
 
 ## The problem
 
@@ -109,8 +129,8 @@ point.
   what the DeepSeek batch sends; `LotValuationPrompt.standardTemperature` names the `0.2` every other
   pass samples at (the pricing pass, the photograph reads, the single-pass appraisals, in both
   transports — the literal is gone from `GeminiValuationService` too). The Gemini half of the "mirror"
-  is a Tier 4 job: that transport has no batched path yet, so when `ManifestService` lands it passes the
-  same constant rather than its own.
+  **landed in Tier 4**: `GeminiValuationService`'s `manifestBatch(_:)` passes this same constant rather
+  than one of its own, so the batcher's temperature belongs to the batcher whichever model reads the batch.
 - **Acceptance (harness):** check 48 reads the schema as JSON (a line must carry `views`;
   `unreadPhotos` is an array of numbers; the top level still requires only `manifest`), asserts each cue
   and the tiebreaker in the prompt, asserts both temperatures as constants, and then drives a real batch
@@ -151,21 +171,31 @@ point.
   asserts the note on the pricing request; check 39 covers the fold's own roll-ups under the new rule;
   check 48 still pins that the batch schema asks no batch for a conflict.
 
-## Tier 4 — stronger identity model, provider split, and surfacing
+## Tier 4 — stronger identity model, provider split, and surfacing — **I and credentials done**
+(harness checks 50, 50b); **J still to do**
 
 ### I. Provider split (identity ≠ pricing)
-- Add a `ManifestService` protocol (`manifestBatch(_:) async throws -> [ManifestItem]`) with its own
-  request struct; both transports conform.
+- Add a `ManifestService` protocol (`manifestBatch(_:) async throws -> ManifestBatchAnswer`) with its own
+  request struct; both transports conform. (`ManifestBatchAnswer` rather than `[ManifestItem]` because the
+  batch's *accounting* — which frames it declared empty — is only visible to the route if the answer
+  carries it; deviation 37.)
 - Gemini answers via `generateContent` with `LotManifestPrompt.manifestSchema` as **`responseSchema`**
   (strict enforcement); DeepSeek answers as today (`json_object` plus the embedded schema).
 - `DeepSeekValuationService` gains an optional injected `ManifestService`; when it is `nil` it batches
   itself (today's behaviour, unchanged). `manifestRoute` calls the injected service when there is one.
 - Add `gemini-2.5-pro` to `GeminiValuationService.availableModelIDs` as the stronger identity model —
-  DeepSeek has no stronger public vision model, which is *why* the split exists.
+  DeepSeek has no stronger public vision model, which is *why* the split exists. **Landed, and then the
+  model retired with its series:** Google has since taken the whole 2.5 family away, so the menu offers
+  `gemini-3.8-flash` alone (README deviation 2) and a stored 2.5 ID is served as that default
+  (harness 50c). The role outlived the model, because what it turned out to buy is a second key and a
+  strictly enforced `responseSchema` rather than a bigger model ID — the stronger-reader argument is
+  the one part of this bullet the retirement took with it (README deviation 39(e)).
 - New `AppSettings.identityProvider` (`.same` / `.gemini` / `.deepSeek`, default `.same`), a picker in
   the Account sheet, and `ValuationOutcome` reporting both the identity and the pricing model IDs.
 - **Acceptance:** harness checks the identity request goes to the chosen provider and carries the
   right schema mode, and that pricing still goes to the pricing provider.
+- **Landed** as checks 50 (the split end to end) and 50b (its inert states and its keys); see
+  *What Tier 4's split actually came to* above for the three things the plan did not name.
 
 ### Credentials and the Account sheet (required *with* the split)
 
@@ -183,12 +213,13 @@ armed-provider pair.
 - `AppSettings`: redefine `hasAPIKey` (and `canScanLots`) to require the pricing key **and**, when the
   split is on, the identity key — `hasAPIKey(for:)` already answers for a *named* provider, so this is
   a short change once `identityProvider` exists.
-- `SiteSettingsSheet`: still to add the "Identity (manifest) provider" picker; the header pill, the
-  per-section key chips and the warning already name *which* key is which, and the footnote already
-  says that switching appraisers is lossless. Extend that footnote to explain that, when split, the
-  Gemini key goes to Gemini for the manifest pass and the DeepSeek key to DeepSeek for pricing.
+- `SiteSettingsSheet`: the **Reads manifests** picker is in (always drawn, disabled while nothing
+  batches, with the help text naming the row that has to change); the header pill, the per-section key
+  chips and the warning already name *which* key is which, and the footnote already says that switching
+  appraisers is lossless. Its split footnote says which key sees which half, and the warning for a
+  missing *identity* key gives both ways out (paste it, or go back to *Same as appraiser*). **Landed.**
 - `ControlPanelView` summary and dot, and `AnalysisCoordinator.requireScanning()`, inherit the new
-  `hasAPIKey` and name the missing provider.
+  `hasAPIKey` and name the missing provider. **Landed** (`missingKeyPhrase` /`identityRouteSummary`).
 
 ### J. Surface residual duplicates
 - After pricing, flag `DiscoveredItem`s that share an identifier or overlapping photos/views, so the
@@ -203,8 +234,9 @@ armed-provider pair.
    deviation 37).
 3. Tier 3 (H) — count resolution. **Done** (check 49; README deviation 38).
 4. Tier 4 (I, credentials, J) — the largest surface, last, because it needs two keys and a new picker.
-   **Next.** (The Account sheet's two key sections and the About sheet's key instructions landed early, as
-   deviation 36 — see *Credentials and the Account sheet*.)
+   **I and the credentials work are done** (harness checks 50, 50b; README deviation 39), and the Account
+   sheet's two key sections plus the About sheet's key instructions landed earlier still, as deviation 36.
+   **J is next:** the "possible duplicate" chip on a priced row built from one carton's two batches.
 
 Each step: build (`xcodebuild … CODE_SIGNING_ALLOWED=NO`), run `Tools/free-tier-harness/run.sh`, add
 the harness check named above, and update the README (architecture, "How one scan works", cost

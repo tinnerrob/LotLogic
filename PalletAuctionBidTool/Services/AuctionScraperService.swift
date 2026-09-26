@@ -8,39 +8,6 @@
 import Foundation
 import WebKit
 
-/// Scrape-wide hard limits.
-///
-/// Deliberately top-level and non-isolated so both the `@MainActor` service and the
-/// settings/validation code can read it without hopping actors.
-enum ScrapeLimits {
-    /// Runaway guard on how many result pages will ever be walked.
-    ///
-    /// This is a guard, not a target, and it is no longer the brief's ten pages: the walk ends when
-    /// the listing runs out of pages (no next control, no change, no cards), so the number below only
-    /// decides when a catalogue that paginates for ever has to be given up on. **All pages** in the
-    /// control panel means exactly that — walk until the site stops — which is why the ceiling had to
-    /// move: a listings site with more than ten pages is ordinary, and a menu that stops at ten would
-    /// silently truncate it.
-    static let maximumPages = 100
-
-    /// `AppSettings.pageLimit`'s "every page" marker: the guard above, reached by asking for none.
-    static let allPagesMarker = 0
-
-    /// Pages walked by a fresh install, before the operator has an opinion.
-    static let defaultPages = 3
-}
-
-/// Credentials typed into the site's own login form.
-struct ScraperCredentials: Sendable, Equatable {
-    var email: String
-    var password: String
-
-    var isEmpty: Bool {
-        email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
-
 /// Progress reported while a scrape is in flight. Delivered on the main actor.
 enum ScraperEvent: Sendable {
     case status(String)

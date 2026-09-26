@@ -29,6 +29,7 @@ final class AppSettings {
         static let apiKey = "geminiAPIKey"
         static let modelID = "geminiModelID"
         static let provider = "valuationProvider"
+        static let identityProvider = "identityProvider"
         static let deepSeekAPIKey = "deepSeekAPIKey"
         static let deepSeekModelID = "deepSeekModelID"
         static let pageLimit = "pageLimit"
@@ -72,7 +73,26 @@ final class AppSettings {
     /// request — which carries every reading anyway — is the cheaper place to spend the tail.
     static let maximumPhotosPerScan = 32
 
+    /// The **Photos / scan** marker for reading the whole gallery in **one** request: every frame the
+    /// inline budget can carry travels in a single body, so a lot costs one model call instead of one
+    /// per photograph (`wholeGalleryPerScan` ⇒ `PhotoScanPlan.disabled` ⇒ the service's single pass).
+    ///
+    /// This is the route the app had before the per-photograph pipeline existed, kept as an explicit
+    /// choice rather than as a leftover: a lot that only needs a coarse reading — a forty-frame gallery
+    /// on a per-minute quota, or a first look before paying for the thorough scan — can spend one
+    /// request on the whole of it instead of forty-one. What bounds it is the inline ceiling
+    /// (`LotImageLoader.defaultTotalBytes`), and a frame that does not fit is reported as skipped
+    /// rather than dropped, so the row can still say "38 of 40".
+    ///
+    /// Negative on purpose: every other value of this setting is a *count* of photographs read one at
+    /// a time (`0` being all of them), so the marker cannot collide with a ceiling, and the choice is
+    /// visible in the stored preference as the negative a count never is.
+    static let wholeGalleryPerScan = -1
+
     /// The counts the **Photos / scan** menu offers, most generous last. `0` is every photograph.
+    ///
+    /// Counts only, because the count is what the menu's arithmetic is built on;
+    /// `wholeGalleryPerScan` is not one, so the sheet draws that entry itself.
     static let photoScanChoices = [0, 4, 8, 12, 16, 24]
 
     /// How many of a lot's photographs one **batched** request carries by default: the count the
@@ -106,6 +126,20 @@ final class AppSettings {
     /// Which back end appraises lots.
     var provider: ValuationProvider
 
+    /// Which back end **reads a lot's photographs into the manifest** its inventory is priced from,
+    /// while `provider` prices that inventory (Tier 4 of `docs/manifest-identity-plan.md`).
+    ///
+    /// `.same` is the whole of what every install did before this existed, and it is the default: one
+    /// provider for both jobs. Naming another provider buys the identity half from the model that reads
+    /// a carton best — a Gemini section pointed at `gemini-3.8-flash` among them — while the prices stay
+    /// on the appraiser's key, which is what keeps the reading half affordable as *only* the extraction
+    /// step (`ValuationOutcome.identityModelID`, `manifestModelID`).
+    ///
+    /// Inert unless the run actually batches: only the batched route has a manifest at all, so the
+    /// choice does nothing while **Appraise with** is Gemini or **Photos / request** is Off
+    /// (`runsSplitIdentity`).
+    var identityProvider: IdentityProvider
+
     /// Google AI Studio key used for the Gemini REST calls.
     var apiKey: String
 
@@ -130,13 +164,18 @@ final class AppSettings {
     var requestsPerMinute: Int
 
     /// How many of a lot's photographs a scan reads **one at a time**, from the front of the gallery;
-    /// `0` — the shipped default — means every photograph the lot carries.
+    /// `0` — the shipped default — means every photograph the lot carries, and `wholeGalleryPerScan`
+    /// means none of them: the whole gallery travels in one request instead.
     ///
     /// A thorough scan asks a separate question about each photograph and then reconciles the answers,
     /// which is what makes a thirty-dollar item in the corner of frame nine show up in the line items
     /// instead of being averaged away by the pallet in front of it. The cost is one request per
     /// photograph, so this is the ceiling a metered key sets: photographs past it are not dropped —
     /// they travel with the reconciliation request — but they are not read individually either.
+    ///
+    /// The whole-gallery marker is the other end of the same trade, and the one way to make a lot cost
+    /// a single request: it gives up the per-frame readings (and with them the store, the frame
+    /// grouping, and the "which picture did this figure come from" trail) for a gallery-wide average.
     var photosPerScan: Int
 
     /// How many of a lot's photographs one **batched** request carries, or `0` for **Off** — read the
@@ -178,6 +217,11 @@ final class AppSettings {
         email = defaults.string(forKey: Key.email) ?? ""
         password = defaults.string(forKey: Key.password) ?? ""
         provider = ValuationProvider(rawValue: defaults.string(forKey: Key.provider) ?? "") ?? .gemini
+        // An unrecognised or absent value is `.same`: the split is an extra, and a preference file that
+        // predates it (or names a provider this build dropped) must read as "one provider, as before"
+        // rather than as a run pointed at a service nobody chose.
+        identityProvider = IdentityProvider(rawValue: defaults.string(forKey: Key.identityProvider) ?? "")
+            ?? .same
         apiKey = defaults.string(forKey: Key.apiKey) ?? ""
         modelID = defaults.string(forKey: Key.modelID) ?? GeminiValuationService.defaultModelID
         deepSeekAPIKey = defaults.string(forKey: Key.deepSeekAPIKey) ?? ""
@@ -193,14 +237,14 @@ final class AppSettings {
             defaults.object(forKey: Key.requestsPerMinute) as? Int ?? Self.defaultRequestsPerMinute
         )
         // Read as an object again, so a deliberate 0 ("every photograph") survives a relaunch instead
-        // of being mistaken for "never configured" and silently becoming every photograph anyway.
-        photosPerScan = max(
-            0,
-            min(
-                defaults.object(forKey: Key.photosPerScan) as? Int ?? Self.defaultPhotosPerScan,
-                Self.maximumPhotosPerScan
-            )
-        )
+        // of being mistaken for "never configured" and silently becoming every photograph anyway — and
+        // so the whole-gallery marker does, which a clamp at zero would eat. A count is still clamped
+        // to what the pipeline can honour, so a hand-edited preference file cannot ask for a ceiling
+        // this build has no route for.
+        let storedPhotosPerScan = defaults.object(forKey: Key.photosPerScan) as? Int
+        photosPerScan = storedPhotosPerScan == Self.wholeGalleryPerScan
+            ? Self.wholeGalleryPerScan
+            : max(0, min(storedPhotosPerScan ?? Self.defaultPhotosPerScan, Self.maximumPhotosPerScan))
         // Same object-for-an-integer read, for the same reason: **Off** (`0`) is a deliberate choice
         // about how a gallery is read, not an unset field.
         photosPerRequest = max(
@@ -242,13 +286,29 @@ final class AppSettings {
     var walksEveryPage: Bool { pageLimit <= 0 }
 
     /// Photographs per scan clamped into what the pipeline can honour.
-    var effectivePhotosPerScan: Int { max(0, min(photosPerScan, Self.maximumPhotosPerScan)) }
+    ///
+    /// The whole-gallery marker is not a count, so it passes through as itself rather than being
+    /// clamped to `0`: "none of them read one at a time" and "every one of them read one at a time" are
+    /// the two ends of this setting, and they must not collapse into each other.
+    var effectivePhotosPerScan: Int {
+        photosPerScan == Self.wholeGalleryPerScan
+            ? Self.wholeGalleryPerScan
+            : max(0, min(photosPerScan, Self.maximumPhotosPerScan))
+    }
+
+    /// `true` while a scan sends the whole gallery in **one** request: no per-photograph readings at
+    /// all, just the frames (as many as the inline budget carries) and one gallery-wide question.
+    var readsWholeGalleryInOneRequest: Bool { effectivePhotosPerScan == Self.wholeGalleryPerScan }
 
     /// Photographs per **batch** clamped into what one request can honour.
     var effectivePhotosPerRequest: Int { max(0, min(photosPerRequest, Self.maximumPhotosPerRequest)) }
 
     /// `true` while a scan reads **every** photograph of a lot one at a time, which is the default.
-    var readsEveryPhotograph: Bool { effectivePhotosPerScan <= 0 }
+    ///
+    /// The whole-gallery marker is deliberately *not* this: it reads none of them one at a time (see
+    /// `readsWholeGalleryInOneRequest`), which is why the comparison is against `0` rather than against
+    /// anything that is not a positive ceiling.
+    var readsEveryPhotograph: Bool { effectivePhotosPerScan == 0 }
 
     /// `true` while a lot's photographs are read in **batches** rather than one at a time.
     ///
@@ -259,21 +319,29 @@ final class AppSettings {
     var batchesPhotographs: Bool { provider == .deepSeek && effectivePhotosPerRequest > 0 }
 
     /// The photograph budget in words, for the run log and the status line.
+    ///
+    /// The whole-gallery route is its own phrase rather than a count of zero: "none of them read one at
+    /// a time" is a different sentence from "the first 0 photograph(s)", and the log is the one place an
+    /// operator sees which route a run is about to take (`photoRouteSummary`).
     var photoScanSummary: String {
-        readsEveryPhotograph
+        if readsWholeGalleryInOneRequest { return "the whole gallery in one request" }
+        return readsEveryPhotograph
             ? "every photograph"
             : "the first \(effectivePhotosPerScan) photograph(s)"
     }
 
     /// The route in words, for the run log and the status line.
     ///
-    /// A noun phrase, because that is how the log uses it — `Scanning lot 142 — DeepSeek
-    /// deepseek-flash, photographs in batches of 6 on its lot page`. Says batching when it is on and the
-    /// per-photograph budget when it is not, so the line an operator reads before spending anything
-    /// describes what the run will actually do.
+    /// A noun phrase, because that is how the log uses it — `Scanning lot 142 — Gemini
+    /// gemini-3.8-flash, the whole gallery in one request on its lot page`. Says batching when it is on,
+    /// the whole-gallery phrase when the operator chose it — which must not be followed by "read one at
+    /// a time", since that is the route it was chosen instead of — and the per-photograph budget
+    /// otherwise, so the line an operator reads before spending anything describes what the run will
+    /// actually do.
     var photoRouteSummary: String {
-        batchesPhotographs
-            ? "photographs in batches of \(effectivePhotosPerRequest)"
+        if batchesPhotographs { return "photographs in batches of \(effectivePhotosPerRequest)" }
+        return readsWholeGalleryInOneRequest
+            ? photoScanSummary
             : "\(photoScanSummary) read one at a time"
     }
 
@@ -288,8 +356,14 @@ final class AppSettings {
     /// pay twice for the photographs. So while batching is on, this plan is `.disabled` — and the
     /// DeepSeek service's own `photosPerRequest` is what it runs instead. Nothing else in the app has to
     /// know which route was chosen.
+    ///
+    /// **Photos / scan** set to `wholeGalleryPerScan` yields the same `.disabled`, and for the same
+    /// reason: it *is* "one request carries the gallery, no per-photograph readings", which is exactly
+    /// what `.disabled` means to either service (`GeminiValuationService.value(subject:)` goes straight
+    /// to its single-pass body with every frame the inline budget holds). Nothing downstream has to
+    /// learn a third route — a plan that reads no photograph individually needs no plan.
     func photoScanPlan() -> PhotoScanPlan {
-        guard !batchesPhotographs else { return .disabled }
+        guard !batchesPhotographs, !readsWholeGalleryInOneRequest else { return .disabled }
         return .thorough(
             modelID: activeModelID,
             perImageLimit: effectivePhotosPerScan,
@@ -340,13 +414,24 @@ final class AppSettings {
     }
 
     /// The model one provider would use, falling back to its default when the stored choice is empty
-    /// (a fresh install, or a reset).
+    /// (a fresh install, or a reset) **or is no longer offered**.
+    ///
+    /// The second half is the retirement rule. A model ID is only ever stored from `availableModelIDs` —
+    /// the picker's own entries — so a value outside that list is a preference file written by a build
+    /// whose menu has since dropped it, and serving it would send `:generateContent` to a retired model
+    /// (an error on the first scan of every lot) while the operator's only visible setting still looks
+    /// right. The current default is served instead. The stored string itself is left where it is:
+    /// choosing a model in Account overwrites it, and an older build run from the same preference file
+    /// still finds what it wrote.
     func modelID(for provider: ValuationProvider) -> String {
         let stored = switch provider {
         case .gemini: modelID
         case .deepSeek: deepSeekModelID
         }
-        return stored.isEmpty ? provider.defaultModelID : stored
+        guard !stored.isEmpty, provider.availableModelIDs.contains(stored) else {
+            return provider.defaultModelID
+        }
+        return stored
     }
 
     /// Stores a model against the provider it belongs to.
@@ -371,9 +456,89 @@ final class AppSettings {
     /// choice is empty (a fresh install, or a reset).
     var activeModelID: String { modelID(for: provider) }
 
+    // MARK: - The identity half (Tier 4)
+
+    /// The provider that reads a lot's **manifest**, given who is pricing it.
+    ///
+    /// `.same` answers `provider`, which is what makes the whole split a no-op for an install that has
+    /// not asked for it — every caller can go through here without asking whether a split is on.
+    var manifestProvider: ValuationProvider {
+        identityProvider.provider(fallingBackTo: provider)
+    }
+
+    /// The model the manifest pass runs on.
+    ///
+    /// Read through `modelID(for:)`, so the identity half picks up whichever model its own section in
+    /// Account names — including a model the appraiser would never be pointed at on price grounds.
+    var manifestModelID: String { modelID(for: manifestProvider) }
+
+    /// `true` when this install reads its manifests on one provider and prices them on another.
+    ///
+    /// Three things have to line up, and all three are choices rather than facts: something has to
+    /// batch (**Photos / request** on, **Appraise with** DeepSeek — `batchesPhotographs`), the identity
+    /// role has to be filled by a provider (`IdentityProvider`), and it has to be a different provider
+    /// from the appraiser's. Folding the first in is what keeps the setting from looking broken: an
+    /// operator who sets an identity provider and then turns batching off gets one provider doing both
+    /// jobs, which is the whole meaning of *Same as appraiser*.
+    var runsSplitIdentity: Bool {
+        batchesPhotographs && manifestProvider != provider
+    }
+
+    /// The identity pass in words, for the run log: `read on Gemini gemini-3.8-flash`, or `""` when the
+    /// appraiser reads its own batches.
+    ///
+    /// Empty rather than *"read on DeepSeek"* when there is no split, because the line it is appended to
+    /// already names the model doing the work — and three quarters of a run's console lines should not
+    /// grow a clause about a setting that is off.
+    var identityRouteSummary: String {
+        runsSplitIdentity
+            ? ", manifest read on " + manifestProvider.displayName + " " + manifestModelID
+            : ""
+    }
+
+    /// The provider whose key is missing, when one is: `nil` means a scan can run.
+    ///
+    /// The appraiser is asked first — its key is the one every route needs — and then the identity
+    /// provider, and only while the split is actually on. Reported as a *provider* rather than as a
+    /// boolean so the readiness note and the coordinator can name the section that needs attention
+    /// instead of saying "add a key" beside two key fields.
+    var missingKeyProvider: ValuationProvider? {
+        if !hasAPIKey(for: provider) { return provider }
+        let identity = manifestProvider
+        if runsSplitIdentity, !hasAPIKey(for: identity) { return identity }
+        return nil
+    }
+
+    /// Which half of a split run a missing key belongs to, in words: `" (the manifest half)"`, or `""`
+    /// when the key in question is the appraiser's or there is no split.
+    ///
+    /// A sentence about a missing key has to be able to say *what it was going to pay for*, because a
+    /// split run buys two things from two providers and only the appraiser's key was ever needed to
+    /// price anything. Said once here so the status line and the console agree on the phrase.
+    func missingKeyRolePhrase(for missing: ValuationProvider) -> String {
+        runsSplitIdentity && missing == manifestProvider ? " (the manifest half)" : ""
+    }
+
+    /// The missing key as a noun phrase for a sentence: `"a Gemini key (the manifest half)"`.
+    ///
+    /// Falls back to the appraiser's own provider when nothing is missing, so a caller that has already
+    /// established there *is* a gap (the readiness note, the console line a scrape ends with) can drop
+    /// `missingKeyProvider` and write one clause. A phrase rather than a whole sentence because the two
+    /// surfaces word it differently — *"Add … behind the gear, then scan again"* and *"add … to scan a
+    /// row"* — and only the key itself has to be named the same way.
+    var missingKeyPhrase: String {
+        let missing = missingKeyProvider ?? provider
+        return "a \(missing.displayName) key\(missingKeyRolePhrase(for: missing))"
+    }
+
     /// `true` when the *selected* provider has a credential, which is what the Run button and the
     /// readiness note care about.
-    var hasAPIKey: Bool { hasAPIKey(for: provider) }
+    ///
+    /// Widened for the split (Tier 4): a batched run whose manifest would be read on a provider with no
+    /// key has to pay for two halves, so it is exactly as unready as one with no key at all — and the
+    /// provider that is missing is named by `missingKeyProvider`. `hasAPIKey(for:)` is unchanged, which
+    /// is what the two Account sections and the panel's tooltip ask.
+    var hasAPIKey: Bool { missingKeyProvider == nil }
 
     /// Both providers with their key state, the armed one first.
     ///
@@ -392,8 +557,10 @@ final class AppSettings {
     /// optional and no API call is made until a lot is scanned by hand.
     var canStartScrape: Bool { auctionURLValue != nil }
 
-    /// Whether on-demand work can run: the *selected* provider has a key. This is what gates the two
-    /// per-row buttons (**Eval** and **Price**) and the two all-lots buttons in the table toolbar.
+    /// Whether on-demand work can run: the *selected* provider has a key — and, when the run would read
+    /// its manifest on another provider, that one has a key too (`missingKeyProvider`). This is what
+    /// gates the two per-row buttons (**Eval** and **Price**) and the two all-lots buttons in the table
+    /// toolbar.
     ///
     /// There is no "valuation off" switch behind this any more. It never bought anything the buttons
     /// do not: the work is on demand, so not pressing them is the off switch, and an install with no
@@ -449,6 +616,7 @@ final class AppSettings {
         defaults.set(email, forKey: Key.email)
         defaults.set(password, forKey: Key.password)
         defaults.set(provider.rawValue, forKey: Key.provider)
+        defaults.set(identityProvider.rawValue, forKey: Key.identityProvider)
         defaults.set(apiKey, forKey: Key.apiKey)
         defaults.set(modelID, forKey: Key.modelID)
         defaults.set(deepSeekAPIKey, forKey: Key.deepSeekAPIKey)
@@ -478,6 +646,7 @@ final class AppSettings {
         email = ""
         password = ""
         provider = .gemini
+        identityProvider = .same
         apiKey = ""
         modelID = GeminiValuationService.defaultModelID
         deepSeekAPIKey = ""

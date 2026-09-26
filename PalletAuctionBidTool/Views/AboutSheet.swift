@@ -89,8 +89,8 @@ struct AboutSheet: View {
             "Tuning a run",
             "The Tuning button holds how far a run walks (Pages), how fast it is allowed to call out "
                 + "(Requests / min, so a metered key is paced rather than refused), how a lot's "
-                + "photographs are read — in batches of a few frames (Photos / request, DeepSeek) or "
-                + "one at a time (Photos / scan, Gemini) — and the bid "
+                + "photographs are read — in batches of a few frames (Photos / request, DeepSeek), "
+                + "one at a time, or the whole gallery in a single request (Photos / scan) — and the bid "
                 + "percentages and anchor threshold behind the Max bid column and the anchor flags "
                 + "in an expanded row."
         )
@@ -103,7 +103,9 @@ struct AboutSheet: View {
                 + "lossless. Its Forget button drops the photograph readings cached on this machine; "
                 + "readings are what a re-scan with the same model reuses, so forgetting them makes "
                 + "the next scan pay for each photograph again. Keys stay in this Mac's UserDefaults "
-                + "and are sent only to the provider they belong to."
+                + "and are sent only to the provider they belong to — and when Reads manifests sends "
+                + "the batches to one provider while the other prices them, each key sees only its "
+                + "half: the reader gets the photographs, the appraiser the manifest."
         )
 
         topic(
@@ -131,7 +133,9 @@ struct AboutSheet: View {
 
             Text(
                 "Each service keeps its own key and both can be set at once: Account (⌘,) has a section "
-                    + "for each, with its own model, and Appraise with decides which one prices lots."
+                    + "for each, with its own model, and Appraise with decides which one prices lots. "
+                    + "On a batched DeepSeek run, Reads manifests decides whether that run's batches "
+                    + "are read there or by the other key."
             )
             .font(.callout)
             .foregroundStyle(.secondary)

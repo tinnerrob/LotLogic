@@ -155,6 +155,54 @@ enum ValuationProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Which service reads a lot's photographs into the manifest its inventory is priced from.
+///
+/// The batched route has always been one provider doing both jobs, and the two want different models:
+/// reading a carton's printed model number, barcode digits and count off a photograph is a **vision**
+/// problem, while pricing that barcode afterwards is a lookup that pixels cannot improve. So the
+/// identity half can be pointed at either provider while the prices stay with the appraiser
+/// (`AppSettings.identityProvider`, Tier 4 of `docs/manifest-identity-plan.md`).
+///
+/// Only the batched route has a manifest at all, so this is inert unless **Appraise with** is
+/// DeepSeek *and* **Photos / request** is on — see `AppSettings.runsSplitIdentity`. Gemini reads a
+/// gallery frame by frame and reconciles the readings, which is an identity pass of a different
+/// shape and not one that can be handed over without switching the route.
+enum IdentityProvider: String, CaseIterable, Identifiable, Sendable {
+
+    /// One provider for both jobs: whoever appraises a lot also reads its manifest. The default, and
+    /// what every install did before the split existed.
+    case same
+
+    /// Gemini reads the batches — with whichever model its own section in Account names, so the reading
+    /// half is bought on its own key and its own model, current or not.
+    case gemini
+
+    /// DeepSeek reads the batches itself. Spelled out rather than folded into `.same` so that the
+    /// choice survives switching **Appraise with** to Gemini and back.
+    case deepSeek = "deepseek"
+
+    var id: String { rawValue }
+
+    /// The picker's own wording. `.same` names the appraiser it will follow, because *Same* alone
+    /// does not say what it is the same as.
+    func displayName(fallingBackTo pricing: ValuationProvider) -> String {
+        switch self {
+        case .same: "Same as appraiser (\(pricing.displayName))"
+        case .gemini: "Gemini"
+        case .deepSeek: "DeepSeek"
+        }
+    }
+
+    /// The provider that fills the identity role, given the one appraising the lot.
+    func provider(fallingBackTo pricing: ValuationProvider) -> ValuationProvider {
+        switch self {
+        case .same: pricing
+        case .gemini: .gemini
+        case .deepSeek: .deepSeek
+        }
+    }
+}
+
 /// One provider with the state that decides whether it can spend anything, as one row.
 ///
 /// Two surfaces speak about *both* providers at once — the Account sheet's own header and the panel's
@@ -172,7 +220,7 @@ struct ProviderKeyState: Identifiable, Sendable, Equatable {
 
     var id: ValuationProvider.ID { provider.id }
 
-    /// `Gemini · gemini-2.5-flash · key set` — the panel tooltip's own phrase, one provider per part.
+    /// `Gemini · gemini-3.8-flash · key set` — the panel tooltip's own phrase, one provider per part.
     var summary: String {
         "\(provider.displayName) · \(modelID) · \(isReady ? "key set" : "no key")"
     }
