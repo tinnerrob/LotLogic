@@ -193,6 +193,11 @@ final class AnalysisCoordinator {
         report: @escaping @Sendable (PhotoScanReport) -> Void
     ) -> ValuationService {
         let plan = settings.photoScanPlan()
+        // The width travels only with a run that really batches: `AppSettings` owns that rule
+        // (`batchesPhotographs`), so neither transport has to know which provider was named as the reader —
+        // and a width handed to a run with no manifest route would only send it looking for one.
+        let width = settings.batchesPhotographs ? settings.effectivePhotosPerRequest : 0
+        let reader = manifestReader(for: settings, report: report)
         switch settings.provider {
         case .gemini:
             return GeminiValuationService(
@@ -200,6 +205,8 @@ final class AnalysisCoordinator {
                 modelID: settings.activeModelID,
                 requestsPerMinute: settings.requestsPerMinute,
                 photoScan: plan,
+                photosPerRequest: width,
+                manifestReader: reader,
                 report: report
             )
         case .deepSeek:
@@ -208,41 +215,43 @@ final class AnalysisCoordinator {
                 modelID: settings.activeModelID,
                 requestsPerMinute: settings.requestsPerMinute,
                 photoScan: plan,
-                photosPerRequest: settings.effectivePhotosPerRequest,
-                manifestService: manifestReader(for: settings, report: report),
+                photosPerRequest: width,
+                manifestService: reader,
                 report: report
             )
         }
     }
 
-    /// The transport that reads a batched run's manifest, when the operator pointed the identity role at
-    /// somebody other than the appraiser (Tier 4; `AppSettings.identityProvider`).
+    /// The transport that reads a batched run's photographs, when the operator pointed the photograph role at
+    /// somebody other than the appraiser (`AppSettings.photoProvider`).
     ///
-    /// `nil` is this app's way of saying *the appraiser reads its own batches* — the state of
-    /// `IdentityProvider.same`, and of `IdentityProvider.deepSeek` on a DeepSeek-priced run — and the
-    /// DeepSeek service reads `nil` as exactly that, batching through its own pass (see
-    /// `DeepSeekValuationService.manifestService`). So the split changes *who is asked* and nothing else:
-    /// the prices stay on the cheap text model while the photographs go to the one that reads a carton
-    /// best.
+    /// `nil` is this app's way of saying *the appraiser reads its own gallery* — the state of
+    /// `PhotoProvider.same`, and of a reader that resolves to the appraiser's own provider — and both
+    /// transports read `nil` as exactly that, batching through their own pass
+    /// (`DeepSeekValuationService.manifestService`, `GeminiValuationService.manifestReader`). So the split
+    /// changes *who is asked* and nothing else: the prices stay on whichever key appraises while the
+    /// photographs go to the one that reads a carton best.
     ///
-    /// Only the batched route has a manifest at all, so this is built in the DeepSeek branch and nowhere
-    /// else — a Gemini-priced run never reaches it, because `AppSettings.batchesPhotographs` is false
-    /// while Gemini is the appraiser. Gating on `runsSplitIdentity` is what keeps a DeepSeek run with
-    /// batching off (or with the identity role left on *Same as appraiser*) from building a second
-    /// service it would never call.
+    /// **Either provider can be the reader**, and the returned service only ever has `manifestBatch(_:)`
+    /// called on it: a reader is not given a photograph plan (`.disabled`) or a batch width (`0`), because a
+    /// manifest route belongs to the *appraiser* — it is the appraiser that folds the batches and prices the
+    /// inventory, with the reader filling the vision half. That is what makes the two directions one code
+    /// path: a DeepSeek-priced run asks Gemini to read, and a Gemini-priced run asks DeepSeek to.
     ///
-    /// The Gemini identity service is built with the **identity** model ID and its **own** pacer: the two
-    /// halves are two purchases, so each is held to the rate its own key's quota deserves — one shared
-    /// pacer would make a Gemini request wait on DeepSeek's clock and the other way round.
+    /// Gating on `runsSplitPhotos` is what keeps a run whose reader is the appraiser itself — or one with the
+    /// width switched off, so that no manifest exists — from building a second service it would never call.
+    ///
+    /// Each service is built with the **manifest** model ID and its **own** pacer: the two halves are two
+    /// purchases, so each is held to the rate its own key's quota deserves — one shared pacer would make a
+    /// Gemini request wait on DeepSeek's clock and the other way round.
     ///
     /// The scan reporter travels with it for the reason it travels with the appraiser: a report is about
-    /// the row being read, not about which key paid for the reading. Nothing on the batched manifest path
-    /// reports yet, so this is symmetry rather than traffic.
+    /// the row being read, not about which key paid for the reading.
     private static func manifestReader(
         for settings: AppSettings,
         report: @escaping @Sendable (PhotoScanReport) -> Void
     ) -> ManifestService? {
-        guard settings.runsSplitIdentity else { return nil }
+        guard settings.runsSplitPhotos else { return nil }
         switch settings.manifestProvider {
         case .gemini:
             // `photoScan` is left at its `.disabled` default on purpose: the per-photograph plan is the
@@ -254,11 +263,16 @@ final class AnalysisCoordinator {
                 report: report
             )
         case .deepSeek:
-            // Unreachable through the setting — it would mean the identity role and the appraiser are the
-            // same provider, which `runsSplitIdentity` already rejects — but `IdentityProvider` says it is
-            // a possibility, so it answers here rather than in a `default:` that would swallow a case
-            // added later.
-            return nil
+            // The opposite direction of the branch above: DeepSeek reads the batches and the appraiser —
+            // Gemini, or `guard` above would have left this `nil` — prices the manifest they add up to.
+            // Its own two routes are switched off the same way, for the same reason: a reader is only ever
+            // asked for `manifestBatch`, and a width here would send this service looking for a lot to read.
+            return DeepSeekValuationService(
+                apiKey: settings.deepSeekAPIKey,
+                modelID: settings.manifestModelID,
+                requestsPerMinute: settings.requestsPerMinute,
+                report: report
+            )
         }
     }
 

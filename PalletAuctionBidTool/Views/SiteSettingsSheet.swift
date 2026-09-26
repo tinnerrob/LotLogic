@@ -44,7 +44,7 @@ struct SiteSettingsSheet: View {
             Divider().opacity(0.6)
             siteSessionRow
             appraiserRow
-            identityRow
+            photoRow
             keySections
             readingsRow
             warning
@@ -144,47 +144,57 @@ struct SiteSettingsSheet: View {
         }
     }
 
-    /// Row three: **who reads a lot's photographs** when the run batches them, which may be somebody
-    /// other than the appraiser (Tier 4).
+    /// Row three: **who reads a lot's photographs**, which may be somebody other than the appraiser
+    /// (Tier 5 of `docs/manifest-identity-plan.md`).
     ///
     /// Drawn always rather than only while it applies, because a preference an operator has read about
     /// should be findable when they go looking — but inert, and *said* to be inert, while there is no
-    /// manifest to read: the split needs **Appraise with** DeepSeek (Gemini has no batched route) and a
-    /// width in Run Tuning's **Photos / request**, and until both are set no second provider is asked
-    /// for anything (`AppSettings.runsSplitIdentity`).
+    /// manifest to read: a manifest is read in batches, so a run needs a width in Run Tuning's **Photos /
+    /// request** before the route exists at all, and until one does no second provider is asked for
+    /// anything (`AppSettings.runsSplitPhotos`).
+    ///
+    /// Enabled on that *width* rather than on `batchesPhotographs`, and deliberately: with Gemini appraising,
+    /// naming DeepSeek here is exactly what turns the batched route on, so a row disabled by the thing it is
+    /// about could never be turned on.
     ///
     /// This is the row that makes the two model menus below mean different things, so its help names
     /// them: reading a carton's printed code and count off a photograph is a vision job, and pricing
     /// that code afterwards is a lookup pixels cannot improve.
-    private var identityRow: some View {
-        SettingsFieldRow(label: "Reads manifests") {
-            Picker("Reads manifests", selection: $settings.identityProvider) {
-                ForEach(IdentityProvider.allCases) { choice in
+    private var photoRow: some View {
+        SettingsFieldRow(label: "Evaluate photos with") {
+            Picker("Evaluate photos with", selection: $settings.photoProvider) {
+                ForEach(PhotoProvider.allCases) { choice in
                     Text(choice.displayName(fallingBackTo: settings.provider)).tag(choice)
                 }
             }
             .pickerStyle(.menu)
-            .disabled(!settings.batchesPhotographs)
-            .help(identityHelp)
+            .disabled(!settings.canNamePhotoProvider)
+            .help(photoHelp)
         }
     }
 
-    /// What the identity picker is for, in the state it is actually in.
+    /// What the photograph picker is for, in the state it is actually in.
     ///
-    /// Three answers, because the setting has three states and two of them are inert for different
-    /// reasons — a run that does not batch, and a split that has been chosen but is not yet doing
-    /// anything. Naming the row that has to change (*Appraise with*, **Photos / request**) is what makes
-    /// a disabled menu forgivable; see `ManifestService` for the seam itself.
-    private var identityHelp: String {
-        guard settings.batchesPhotographs else {
-            return "Who reads the batches a run sends. Inert for now: only a batched run has a manifest "
-                + "— set Appraise with to DeepSeek and pick a width on Run Tuning's Photos / request row "
-                + "for this to matter."
+    /// Four answers, because the setting has four states and three of them are inert for different reasons —
+    /// no width to read a manifest in, a width but no manifest route on this combination, and a split that
+    /// has been chosen but resolved back to the appraiser (*Same as appraiser*). Naming the row that has to
+    /// change (*Photos / request*, **Appraise with**) is what makes a disabled menu forgivable; see
+    /// `LotManifestScan` for the route itself.
+    private var photoHelp: String {
+        guard settings.canNamePhotoProvider else {
+            return "Who reads a lot's photographs. Inert for now: a manifest is read in batches, so pick a "
+                + "width on Run Tuning's Photos / request row for this to matter."
         }
-        guard settings.runsSplitIdentity else {
+        guard settings.batchesPhotographs else {
+            return "Who reads a lot's photographs. Inert while \(settings.provider.displayName) both "
+                + "appraises and reads: its own route is a gallery read frame by frame on Photos / scan. "
+                + "Naming DeepSeek here reads the gallery in batches instead — the width above is what sizes "
+                + "them — and prices the manifest it produces on \(settings.provider.displayName)."
+        }
+        guard settings.runsSplitPhotos else {
             return "Who reads the batches a run sends, which is \(settings.provider.displayName) itself "
                 + "today: \(settings.activeModelID) reads each lot's photographs and prices what it read. "
-                + "Naming Gemini instead spends a second key on the reading half — its own section's "
+                + "Naming the other provider spends a second key on the reading half — its own section's "
                 + "model is the one that gets the photographs — while the prices keep coming from "
                 + "\(settings.provider.displayName)."
         }
@@ -214,9 +224,9 @@ struct SiteSettingsSheet: View {
     private func keySection(_ provider: ValuationProvider) -> some View {
         let armed = settings.provider == provider
         let ready = settings.hasAPIKey(for: provider)
-        // The identity half, when it is this section's provider doing it: the chip is what stops the
+        // The photograph half, when it is this section's provider doing it: the chip is what stops the
         // model menu below from reading as the appraiser's model when it is in fact the reader's.
-        let readsManifests = settings.runsSplitIdentity && settings.manifestProvider == provider
+        let readsPhotographs = settings.runsSplitPhotos && settings.manifestProvider == provider
 
         return VStack(alignment: .leading, spacing: Theme.fieldSpacing) {
             HStack(spacing: 8) {
@@ -233,8 +243,8 @@ struct SiteSettingsSheet: View {
                     Text("appraises lots").chipStyle(tint: .accentColor)
                 }
 
-                if readsManifests {
-                    Text("reads manifests").chipStyle(tint: .accentColor)
+                if readsPhotographs {
+                    Text("reads photographs").chipStyle(tint: .accentColor)
                 }
 
                 Spacer(minLength: 8)
@@ -274,19 +284,19 @@ struct SiteSettingsSheet: View {
         .cardStyle()
     }
 
-    /// What one section's **Model** menu is choosing — which changes meaning when the split is on.
+    /// What one section's **Model** menu is choosing — which changes meaning when a split is on.
     ///
     /// Without a split every model in the app is the appraiser's, so the note is about modality. With
-    /// one, the identity section's model is the model that *reads* and the appraiser's is the one that
-    /// *prices*: two different jobs whose best answers are not the same model, which is the whole reason
-    /// the split exists.
+    /// one, the reading section's model is the model that *reads* — in batches, either provider — and the
+    /// appraiser's is the one that *prices*: two different jobs whose best answers are not the same model,
+    /// which is the whole reason the split exists.
     private func modelHelp(for provider: ValuationProvider) -> String {
-        guard settings.runsSplitIdentity else {
+        guard settings.runsSplitPhotos else {
             return "Only multimodal models are listed: a scan sends the lot's photographs."
         }
         return provider == settings.provider
             ? "The model that prices each lot from the manifest. The photographs are read by "
-                + "\(settings.manifestProvider.displayName) — see Reads manifests above."
+                + "\(settings.manifestProvider.displayName) — see Evaluate photos with above."
             : "The model that reads each lot's photographs into its manifest. The prices come back from "
                 + "\(settings.provider.displayName) \(settings.activeModelID)."
     }
@@ -355,13 +365,13 @@ struct SiteSettingsSheet: View {
     ///
     /// The split added a second way to be unready, and it is a different fix: a batched run whose
     /// manifest would be read by a provider with no key can be repaired either by pasting that key or by
-    /// putting the **Reads manifests** row back on *Same as appraiser*, so the note says both. Which of
+    /// putting the **Evaluate photos with** row back on *Same as appraiser*, so the note says both. Which of
     /// the two boxes the key belongs in is not something this view works out — `missingKeyProvider`
     /// already knows.
     ///
-    /// The switching hint that follows the other sentence is deliberately absent when the *identity*
-    /// key is the missing one: it answers "which appraiser could run instead", and the appraiser is not
-    /// what is missing.
+    /// The switching hint that follows the other sentence is deliberately absent when the *reading* key is
+    /// the missing one: it answers "which appraiser could run instead", and the appraiser is not what is
+    /// missing.
     @ViewBuilder
     private var warning: some View {
         if let missing = settings.missingKeyProvider {
@@ -371,12 +381,12 @@ struct SiteSettingsSheet: View {
                 " \($0.provider.displayName) already has one, so Appraise with can switch to it now."
             } ?? ""
 
-            if settings.runsSplitIdentity && missing == settings.manifestProvider {
+            if settings.runsSplitPhotos && missing == settings.manifestProvider {
                 warningLabel(
                     "Nothing can be appraised yet: this run would read each lot's photographs on "
                         + "\(missing.displayName) and price them on \(settings.provider.displayName), and "
                         + "the \(missing.displayName) section above has no key. Paste one there, or set "
-                        + "Reads manifests to Same as appraiser to read the batches on "
+                        + "Evaluate photos with to Same as appraiser to read the photographs on "
                         + "\(settings.provider.displayName) itself."
                 )
             } else {
@@ -413,10 +423,11 @@ struct SiteSettingsSheet: View {
     /// Empty when there is no split, because the footnote already says the lossless thing and a
     /// paragraph about a setting that is off is how a footnote becomes unread. When there *is* one it
     /// has to be said plainly — two keys, one run, and each provider is handed only the half it is being
-    /// paid for: the reader its photographs, the appraiser the manifest it prices.
+    /// paid for: the reader its photographs, the appraiser the manifest it prices. Which provider is which
+    /// is read off the setting rather than assumed, so the sentence is the same one in both directions.
     private var splitFootnote: String {
-        guard settings.runsSplitIdentity else { return "" }
-        return " With Reads manifests set to \(settings.manifestProvider.displayName), the "
+        guard settings.runsSplitPhotos else { return "" }
+        return " With Evaluate photos with set to \(settings.manifestProvider.displayName), the "
             + "\(settings.manifestProvider.displayName) key is sent each lot's photographs and the "
             + "\(settings.provider.displayName) key the manifest they were read into, plus the listing "
             + "text — neither key sees the other's half, and both are needed before a scan can run."

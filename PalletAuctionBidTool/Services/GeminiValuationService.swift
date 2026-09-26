@@ -46,7 +46,7 @@ import Foundation
 ///
 /// ## The manifest role (Tier 4)
 /// This transport also fills the **identity** half of the batched route when the operator points it
-/// there (`ManifestService`, `AppSettings.identityProvider`): `manifestBatch(_:)` asks the batch
+/// there (`ManifestService`, `AppSettings.photoProvider`): `manifestBatch(_:)` asks the batch
 /// question about a run of frames and answers with manifest items, which another transport then
 /// prices. That is not a third route — the pricing half stays on whichever provider was armed — and
 /// it is worth having for one structural reason: a `:generateContent` call carries
@@ -124,6 +124,24 @@ struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sen
     /// `PhotoScanPlan.thorough(...)` in (`AppSettings.photoScanPlan`).
     let photoScan: PhotoScanPlan
 
+    /// How many photographs one **manifest batch** request carries. `0` — the default here — means this
+    /// transport is not running the batched route at all, and leaves `photoScan` to decide how the gallery
+    /// is read.
+    ///
+    /// The app sets this from **Photos / request** (`AppSettings.photosPerRequest`), and only while the run
+    /// really does batch (`AppSettings.batchesPhotographs`): a width the route would not use is worse than no
+    /// width, because it would send this transport looking for a manifest to price with nothing to read it.
+    let photosPerRequest: Int
+
+    /// The service that reads this transport's manifest batches, when the photograph half belongs to another
+    /// provider (`ManifestService`, `AppSettings.photoProvider`).
+    ///
+    /// `nil` — the default — means this transport reads its own gallery, which is every install that has not
+    /// asked for a split. Given a service, the batches go there and the manifest it returns is priced here,
+    /// so the vision half can be bought from the model that reads a carton best while the prices stay on
+    /// whichever key the operator appraises with.
+    let manifestReader: (any ManifestService)?
+
     /// Where per-photograph readings are remembered between scans (`PhotoReadingStore`).
     let store: PhotoReadingStore
 
@@ -140,6 +158,8 @@ struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sen
         requestsPerMinute: Int = 0,
         maxAttempts: Int = 4,
         photoScan: PhotoScanPlan = .disabled,
+        photosPerRequest: Int = 0,
+        manifestReader: (any ManifestService)? = nil,
         store: PhotoReadingStore = .shared,
         report: @escaping @Sendable (PhotoScanReport) -> Void = { _ in }
     ) {
@@ -150,6 +170,8 @@ struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sen
         self.maxTotalImageBytes = maxTotalImageBytes
         self.maxAttempts = max(1, maxAttempts)
         self.photoScan = photoScan
+        self.photosPerRequest = max(0, photosPerRequest)
+        self.manifestReader = manifestReader
         self.store = store
         self.report = report
         self.pacer = requestsPerMinute > 0 ? RequestPacer(requestsPerMinute: requestsPerMinute) : nil
@@ -165,10 +187,13 @@ struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sen
         // Every photograph the lot carries: the count came off the lot's own page, so there is
         // nothing to trim for and nothing to configure — only the inline budget can hold any back.
         let candidates = subject.imageURLs
-        let download = await LotImageLoader.download(
+        // The download ceiling depends on the route: the batched route sends the gallery in several
+        // requests, so it may hold more of it than a single request could carry; every other route puts the
+        // whole set in one request and stays inside the one-request budget.
+        var download = await LotImageLoader.download(
             candidates,
             maxBytes: maxImageBytes,
-            totalBytes: maxTotalImageBytes,
+            totalBytes: photosPerRequest > 0 ? LotManifestScan.downloadBytes : maxTotalImageBytes,
             session: session
         )
         let description = LotValuationPrompt.listingText(for: subject)
@@ -184,6 +209,35 @@ struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sen
         // roll them up exactly as it always did.
         let labels = download.images.isEmpty ? [] : await LotImageDigest.readEach(download.images)
         let evidence = LotImageDigest.merge(labels)
+
+        // The batched route, when the operator pointed the photograph half somewhere (`AppSettings
+        // .photoProvider`): the batches are read by `manifestReader` — DeepSeek, unless somebody named this
+        // transport, in which case this is the shape it reads a gallery in when the width is set — and the
+        // inventory they add up to is priced here. A lot the route cannot read falls through to the passes
+        // below rather than failing; the console is told why.
+        if photosPerRequest > 0, !download.images.isEmpty {
+            if let outcome = try await manifestRoute(
+                subject: subject,
+                description: description,
+                download: download,
+                labels: labels,
+                evidence: evidence
+            ) {
+                return outcome
+            }
+
+            // Out of the batched route and into one that puts the whole set in a *single* request, so the
+            // set is trimmed back to what one request may carry (`LotManifestScan.downloadBytes` was what
+            // let the download hold more). Whatever the trim drops is counted as skipped, exactly as a frame
+            // the download itself could not take is, so the row and the console keep saying `40 of 46`
+            // rather than quietly reporting fewer.
+            let sendable = LotManifestScan.withinOneRequest(download.images, budget: maxTotalImageBytes)
+            if sendable.count < download.images.count {
+                let dropped = Array(download.images.dropFirst(sendable.count))
+                download.images = sendable
+                download.overBudget.append(contentsOf: dropped.map(\.sourceURL))
+            }
+        }
 
         // One request per photograph, then a reconciliation, when the operator asked for it.
         if photoScan.isEnabled, !download.images.isEmpty {
@@ -333,7 +387,7 @@ struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sen
     /// Reads one batch of a lot's photographs into manifest items (`ManifestService`).
     ///
     /// The identity half of a batched appraisal, run on *this* transport because the operator pointed
-    /// the identity role here (`AppSettings.identityProvider`): the same question a DeepSeek batch is
+    /// the identity role here (`AppSettings.photoProvider`): the same question a DeepSeek batch is
     /// asked, answered by a `:generateContent` call whose answer shape is *enforced* rather than
     /// requested — `LotManifestPrompt.manifestSchema` travels as `responseSchema`, so the keys the
     /// fold reads are the API's business rather than the prompt's, which is the one structural
@@ -350,6 +404,77 @@ struct GeminiValuationService: ValuationService, ManifestService, @unchecked Sen
         let answer = try await send(body)
         let (text, finishReason) = try answerText(from: answer)
         return try LotManifestAnswer.answer(fromAnswerText: text, finishReason: finishReason)
+    }
+
+    /// Prices a piece of a settled manifest, in a text-only `:generateContent` call held to
+    /// `LotValuationPrompt.itemsSchema` as `responseSchema`.
+    ///
+    /// This transport's answer to the `ManifestPricingService` question, and the reason the photograph half
+    /// is symmetric: a manifest DeepSeek read is priced *here* whenever this transport is the appraiser, so
+    /// the batches can be bought from whichever model reads a carton best while the prices stay on this key.
+    /// No photographs travel: the goods have been identified and counted, and what is left is a lookup —
+    /// brand, model number, printed size, barcode digits — which pixels cannot improve.
+    func priceManifest(_ request: ManifestPriceRequest) async throws -> [DiscoveredItem] {
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ValuationError.missingAPIKey
+        }
+        let body = try manifestPriceRequestBody(request)
+        let answer = try await send(body)
+        return try decodeItems(from: answer)
+    }
+
+    /// Runs the batched route for one lot: one **manifest batch** per chunk of the gallery, then the pricing
+    /// requests over the inventory they add up to (one per dozen lines, so ordinarily one).
+    ///
+    /// Everything that decides *what happens* — the grouping, the batches, the fold, the accounting, the
+    /// fallback — is `LotManifestScan`'s, and is the same code the DeepSeek transport runs: this method
+    /// supplies the two halves the route is handed, and neither half has to be DeepSeek's for the route to
+    /// run. It is reached only when the app hands this transport a width (`photosPerRequest`), which it does
+    /// only while the operator has pointed the photograph half away from the appraiser — so this is the
+    /// Gemini-priced, DeepSeek-read run.
+    ///
+    /// Returns `nil` when the route could not produce a valuation, with the reason already reported to the
+    /// console, so the caller's fallback is free to take over. A cancelled run is *thrown* instead: a stopped
+    /// run must not fall back into a request nobody is waiting for.
+    private func manifestRoute(
+        subject: ValuationSubject,
+        description: String,
+        download: LotImageDownload,
+        labels: [LotImageEvidence],
+        evidence: LotImageEvidence
+    ) async throws -> ValuationOutcome? {
+        // Whoever the operator named — and with nobody named, this transport, which is the state a run is in
+        // when the app has not been told to point the photograph half anywhere else.
+        let reader: any ManifestService = manifestReader ?? self
+
+        guard let scan = try await LotManifestScan.run(
+            subject: subject,
+            description: description,
+            images: download.images,
+            labels: labels,
+            evidence: evidence,
+            width: photosPerRequest,
+            perRequestBytes: maxTotalImageBytes,
+            read: { request in try await reader.manifestBatch(request) },
+            price: { [self] request in try await priceManifest(request) },
+            report: report
+        ) else { return nil }
+
+        return ValuationOutcome(
+            items: scan.items,
+            imagesAvailable: subject.imageURLs.count,
+            imagesSent: download.images.count,
+            imagesSkipped: download.overBudget.count,
+            modelID: modelID,
+            // Named only when the identity pass was another service's: `nil` says the model above read the
+            // manifest too, which is what every other route in the app does.
+            identityModelID: manifestReader?.modelID,
+            // Every batch, plus the requests that priced them.
+            passes: scan.batches + scan.prices,
+            evidence: evidence,
+            scanRequests: scan.batches + scan.prices,
+            manifest: scan.manifest
+        )
     }
 }
 
@@ -633,6 +758,47 @@ extension GeminiValuationService {
                 temperature: LotManifestPrompt.manifestTemperature,
                 responseMimeType: "application/json",
                 responseSchema: LotManifestPrompt.manifestSchema
+            )
+        )
+        return try JSONEncoder().encode(body)
+    }
+
+    /// Builds the text-only `:generateContent` body for a **manifest pricing** pass.
+    ///
+    /// The same shape as the aggregation pass — one prompt, no images, `itemsSchema` as `responseSchema` —
+    /// and for the same reason: a priced manifest has to decode exactly like any other valuation, so the
+    /// shape is enforced by the API rather than asked for in prose and the prompt carries no schema text.
+    ///
+    /// The manifest travels as the JSON slab `LotManifestPrompt.render(_:)` produced from the *decoded*
+    /// inventory, never as a batch's raw answer, so nothing chatty a batch said can reach the request that
+    /// prices it.
+    private func manifestPriceRequestBody(_ request: ManifestPriceRequest) throws -> Data {
+        let rendered = LotManifestPrompt.render(request.manifest)
+        let body = GenerateContentRequest(
+            systemInstruction: GenerateContentRequest.SystemInstruction(
+                parts: [GenerateContentRequest.TextPart(text: LotManifestPrompt.pricingSystemInstruction)]
+            ),
+            contents: [
+                GenerateContentRequest.Content(
+                    role: "user",
+                    parts: [
+                        .text(
+                            LotManifestPrompt.pricingPrompt(
+                                description: request.description,
+                                manifestText: rendered.text,
+                                itemCount: request.manifest.count,
+                                unitCount: request.manifest.unitCount,
+                                omitted: rendered.omitted,
+                                evidence: request.evidence
+                            )
+                        )
+                    ]
+                )
+            ],
+            generationConfig: GenerateContentRequest.GenerationConfig(
+                temperature: LotValuationPrompt.standardTemperature,
+                responseMimeType: "application/json",
+                responseSchema: LotValuationPrompt.itemsSchema
             )
         )
         return try JSONEncoder().encode(body)

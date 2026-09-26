@@ -53,9 +53,11 @@ hammer falls, whether a lot is worth bidding on.
   prose — including `evidence`, the label wording or barcode digits each price was built from, since
   the app reads the barcodes and model numbers off the photographs itself before the model sees them
   (deviation 26). A DeepSeek lot costs one request per batch plus the one that priced the manifest; a
-  Gemini lot costs one per photograph plus the reconciliation. With **Reads manifests** pointed at the
+  Gemini lot costs one per photograph plus the reconciliation. With **Evaluate photos with** pointed at the
   other provider (deviation 39) the batch requests become *that* provider's, bought with *that*
-  provider's key: the shape of the run and the number of requests are the same, the bill is not.
+  provider's key: the shape of the run and the number of requests are the same, the bill is not — and the
+  same holds the other way round, with a Gemini-priced run buying its photographs from DeepSeek
+  (deviation 40).
 * **Decide** — the table rolls those items up into per-lot retail, resale, profit and ROI, sortable
   by lot, description, bid, retail, resale, profit or ROI in either direction, with the board's counts
   in a strip under the rows, a progress bar in a modal over them and the activity console at the
@@ -200,7 +202,7 @@ PalletAuctionBidTool/
 │   │                                rows an appraisal covers and the photographs a scan has answered
 │   │                                (UI-free)
 │   └── ValuationProvider.swift      Gemini vs DeepSeek, with their models, settings labels and the
-│                                    identity role **Reads manifests** fills (deviation 39)
+│                                    identity role **Evaluate photos with** fills (deviation 39)
 ├── Services/
 │   ├── ScraperScript.swift          Injected JavaScript (`window.__PAS`) automation — cards, and the
 │   │                                reader for a lot's own page (`lotPageImages`)
@@ -224,12 +226,17 @@ PalletAuctionBidTool/
 │   │                                that inventory is worth — with the manifest schema and decode
 │   │                                (`views` required, every frame accounted for) and the pricing
 │   │                                pass's reuse of the line-item schema
-│   ├── ManifestService.swift        The identity half of a batched appraisal as a role any transport
-│   │                                can fill: one batch's question as a value, and the answer a
-│   │                                manifest reader returns (deviation 39)
+│   ├── ManifestService.swift        The batched route's two roles as values any transport can fill: one
+│   │                                batch's question and the answer a manifest reader returns, plus the
+│   │                                pricing question a pricer answers (deviations 39, 40)
+│   ├── LotManifestScan.swift         The batched pipeline itself — group, split into batches, fold the
+│   │                                inventory, account for every frame, price it — written once and
+│   │                                handed `read` and `price`, so either provider can read a lot's
+│   │                                photographs and the appraiser always prices them (deviation 40)
 │   ├── PhotoReadingStore.swift      Readings kept on disk, keyed by lot + model + prompt version
-│   ├── GeminiValuationService.swift REST v1beta `:generateContent` client (schema-constrained) — and
-│   │                                the manifest reader whose answer shape the API enforces
+│   ├── GeminiValuationService.swift REST v1beta `:generateContent` client (schema-constrained) — the
+│   │                                manifest reader whose answer shape the API enforces, and the pricer a
+│   │                                DeepSeek-read manifest is priced by
 │   └── DeepSeekValuationService.swift OpenAI-compatible `/chat/completions` client (json_object;
 │                                    batches the gallery into a manifest, then prices it — reading
 │                                    its own batches unless Account names somebody else, with the
@@ -479,8 +486,9 @@ instead be asked to send **the whole gallery in one request** (**Photos / scan**
 one call per lot with no per-frame readings to reconcile. All three end
 at the same JSON contract, so nothing downstream — the table, the bid ceiling, the console — can tell
 which route produced a figure. On the batched route the *reading* half can be bought from the other
-provider (**Reads manifests** in Account, deviation 39): the batches are asked the same question and the
-inventory is folded the same way, and only the model that read it and the key that paid for it change.
+provider (**Evaluate photos with** in Account, deviations 39–40): the batches are asked the same question and the
+inventory is folded the same way, and only the model that read it and the key that paid for it change —
+whichever direction the two providers are named in.
 
 #### The batched route (DeepSeek's default)
 
@@ -509,9 +517,11 @@ inventory is folded the same way, and only the model that read it and the key th
    or in `unreadPhotos` as a frame holding nothing sellable. And it is asked *cold* — `temperature: 0`
    (`LotManifestPrompt.manifestTemperature`), where every other pass in the app samples at 0.2 —
    because this pass is an extraction rather than an opinion, and the same pallet read twice has to be
-   counted the same twice. This is the pass **Reads manifests** can hand to the other provider
+   counted the same twice. This is the pass **Evaluate photos with** can hand to the other provider
    (deviation 39): the question above *is* the `ManifestService` question, so the batch is told exactly
-   the same thing on either wire — only the model reading it changes, and only its key pays for it.
+   the same thing on either wire — only the model reading it changes, and only its key pays for it. It is
+   also the pass a **Gemini**-priced run buys from DeepSeek in the other direction, since the route belongs
+   to the appraiser and the reading half is a role either way (deviation 40).
 4. **The batches are folded into one inventory** (`PalletManifest.absorb(_:)`), in gallery order
    however the requests landed. A product the batches agree on is one line, and *agree* is decided by the
    strongest evidence there is (`ManifestItem.isSameProduct(as:)`, deviation 35): a barcode both batches
@@ -566,10 +576,11 @@ of them twice costs the reconciliation plus eleven. The batched route groups its
 decoded barcode is deliberately still sent there — it is the same product from another angle, and its
 pixels are the only place a count of the goods can come from — which is why that route also leans on the
 prompt, the fold and the app's own reading of every frame to count one carton once (deviation 33,
-deviation 35). With **Reads manifests** naming the other provider, the first row's batch requests are
+deviation 35). With **Evaluate photos with** naming the other provider, the first row's batch requests are
 bought from *that* provider instead — the run has the same shape and the same number of requests, and
 the run's own record names the model that read the inventory it priced
-(`ValuationOutcome.identityModelID`, deviation 39).
+(`ValuationOutcome.identityModelID`, deviations 39–40). That holds in either direction: a DeepSeek-priced
+run can buy the batches from Gemini, and a Gemini-priced run can buy them from DeepSeek.
 
 #### The thorough route (Gemini, or DeepSeek with batching off)
 
@@ -706,7 +717,7 @@ A hidden web view cannot be clicked, so the app hands the real page back to you:
 
 | Value | Where it lives | Notes |
 | --- | --- | --- |
-| Auction URL, tunings, provider, model IDs, the identity role | `UserDefaults` | Written when a run or a scan starts. **Reads manifests** is stored here too (`identityProvider`), and an absent or unrecognised value reads as *Same as appraiser* — the split is an extra, so a preference file that predates it must not read as a run pointed at a service nobody chose (deviation 39). |
+| Auction URL, tunings, provider, model IDs, the photograph role | `UserDefaults` | Written when a run or a scan starts. **Evaluate photos with** is stored here too (`identityProvider` — the key kept its old name when the row was renamed, so an install that had named a reader keeps it, deviation 40), and an absent or unrecognised value reads as *Same as appraiser* — the split is an extra, so a preference file that predates it must not read as a run pointed at a service nobody chose (deviation 39). |
 | Site email / password | `UserDefaults` | **Plaintext caveat — see below.** Edited in the Account sheet (⌘,). |
 | Gemini API key | `UserDefaults` | Sent as the `x-goog-api-key` header, never in a URL or a log line. Created at `aistudio.google.com/apikey` (free, no billing account). Edited in the Account sheet's **Gemini** section. |
 | DeepSeek API key | `UserDefaults` | Sent as `Authorization: Bearer …`, never in a URL or a log line. Created at `platform.deepseek.com/api_keys` (prepaid balance). Edited in the Account sheet's **DeepSeek** section. |
@@ -751,7 +762,7 @@ Three controls keep a free-tier run from failing lots:
 | --- | --- |
 | **Requests / min** (run tuning, default `10`) | Upper bound on outbound calls per minute. `RequestPacer` is a single shared actor, so concurrent lots queue for the next slot instead of bunching. Set it to `0` / "off" to disable pacing. |
 | **Photos / scan** (run tuning, default **All photographs**) | How a lot's gallery is read on the per-photograph route, and therefore how many requests a **Price** costs there. **All photographs** reads every frame of the lot one at a time; a count reads that many from the front; **Whole gallery (one request)** reads none of them individually and sends the whole gallery in a single call instead — one request per lot whatever its size (as much of the gallery as the inline budget holds, anything past that counted on the row rather than dropped), at the price of a gallery-wide answer with no per-frame readings behind it. On the counts, the frames past the ceiling still travel with the reconciliation — coarser line items, never a smaller pallet — and frames that provably show what an earlier frame showed cost nothing (`PhotoFrameGrouping`), so a count is a ceiling on readings rather than a fixed bill. Inert while DeepSeek is batching (below), which is why the sheet greys it out then. |
-| **Photos / request** (run tuning, default `6`, DeepSeek only) | How many of a lot's photographs travel in **one** request on the batched route. A six-frame batch answers six photographs for one call and lets the model see the front and the side of the same carton in one context; `Off` switches to the per-photograph route and hands the decision back to **Photos / scan**. The row sizes *how many* requests the run makes, never who answers them: **Reads manifests** in Account can hand those batches to the other provider (deviation 39) without changing this number. |
+| **Photos / request** (run tuning, default `6`) | How many of a lot's photographs travel in **one** request on the batched route. A six-frame batch answers six photographs for one call and lets the model see the front and the side of the same carton in one context; `Off` switches to the per-photograph route and hands the decision back to **Photos / scan**. The row is also where the batched route is switched *on*: it sizes the batches DeepSeek reads (deviation 40), so **Evaluate photos with** in Account can point that reading half at DeepSeek while either provider prices what it read — and it is inert while Gemini both appraises and reads, because that gallery is read frame by frame. |
 | **429 retry** | A refusal is waited out, not failed: the delay comes from the `Retry-After` header, else from the `RetryInfo.retryDelay` in Google's error body (`"17s"`), else from exponential back-off with jitter. Up to 4 attempts per request. DeepSeek sends no delay hint, so it always uses the back-off. |
 | **Stop** | Cancellation during a back-off ends the run immediately — a quota pause never holds the app hostage. |
 
@@ -764,7 +775,7 @@ down: one call per lot whatever the gallery size, for a board where even a ceili
 calls than the quota holds. Readings already on this machine are reused, so re-pricing a lot after a tuning
 change does not re-read its gallery. On DeepSeek the arithmetic is the batch width instead: a
 twenty-four frame lot at **Photos / request** `6` is five requests rather than twenty-five, and none of
-them carries more pixels than one request would have. **Reads manifests** (deviation 39) changes who
+them carries more pixels than one request would have. **Evaluate photos with** (deviation 39) changes who
 those batch requests are *bought from*, not how many there are: the reading half goes to the identity
 provider's key and the pricing half stays on the appraiser's, so a free Gemini key can pay for the
 photographs a DeepSeek balance only prices.
@@ -795,7 +806,7 @@ Four things to know before selecting it:
   A twelve-photograph lot costs three requests (two batches and the pricing pass) instead of thirteen,
   and because the frames that show the same carton travel *together*, a carton seen from two angles is
   one manifest entry rather than two readings reconciled after the fact. **Photos / request** is the
-  batch width; `Off` falls back to reading frame by frame. **Reads manifests** in Account can buy that
+  batch width; `Off` falls back to reading frame by frame. **Evaluate photos with** in Account can buy that
   first half elsewhere (deviation 39): the batches are the same size, asked the same question and folded
   the same way, but the reading is done by the other provider's model on the other provider's key — and
   the prices still come from DeepSeek. That is the one way to keep this route's request count *and* spend
@@ -805,9 +816,11 @@ Four things to know before selecting it:
   schema Gemini enforces (`LotValuationPrompt.itemsSchema.jsonSchemaText`, and the manifest's own
   `LotManifestPrompt.manifestSchema`) into the prompt, decoding tolerantly, and re-asking once when the
   answer comes back empty — see deviation 10. Expect the occasional Low-confidence guess where Gemini
-  would have been pinned. **Reads manifests** is the way to have both: Gemini's *enforced* manifest schema
+  would have been pinned. **Evaluate photos with** is the way to have both: Gemini's *enforced* manifest schema
   reads the pallet, and DeepSeek prices the inventory it produced, so this weakness narrows to the
-  pricing pass — where a wrong answer is a price rather than a count.
+  pricing pass — where a wrong answer is a price rather than a count. The mirror image holds too
+  (deviation 40): with Gemini appraising and DeepSeek reading, the weaker contract is the *reading* half,
+  so that arrangement wants DeepSeek for a gallery it can read and Gemini for the arithmetic that follows.
 * **Only `deepseek-flash` is offered,** because it is the only DeepSeek model that declares image
   input. `deepseek-v4-pro` is text-only, and silently appraising photos from listing text alone is
   worse than not offering it.
@@ -1077,10 +1090,10 @@ driving a consumer web page" is not, deliberately.
     fill, the corner (5pt — a capsule is nearly half the button's height), the hairline and the hover
     and press states, rather than trying to reshape the system's. **Account** (`⌘,`) is the old gear,
     unchanged behind the glass: `SiteSettingsSheet` still holds the site login, **Appraise with**, the
-    **Reads manifests** role, and both providers' keys and models — a section each, since deviation 36
+    **Evaluate photos with** role, and both providers' keys and models — a section each, since deviation 36
     — and its tooltip carries the summary line the folded card used to print ("no site login · Gemini ·
     gemini-3.8-flash · key set · DeepSeek · deepseek-flash · no key"), which grows a
-    `manifests read by Gemini gemini-3.8-flash` clause whenever a split is on (deviation 39). The move must
+    `photographs read by Gemini gemini-3.8-flash` clause whenever a split is on (deviations 39–40). The move must
     not hide *which* provider is armed or whether it has a key, because those two facts decide whether the
     table's **Eval** and **Price** buttons do anything. The gear's orange dot came back for the same
     reason: with a tooltip and a button that say nothing at rest, the dot is what warns that no key is set
@@ -1304,7 +1317,7 @@ driving a consumer web page" is not, deliberately.
     thing that *can* still hold a photograph back is the provider's payload ceiling — one image over
     `maxImageBytes`, or a whole gallery over `LotImageLoader.defaultTotalBytes` (12 MB, ~16 MB once
     base64-encoded, comfortably inside Gemini's 20 MB request limit and DeepSeek's 48 MiB body cap). The
-    batched route raises *that* ceiling to two requests' worth (`DeepSeekValuationService.manifestDownloadBytes`,
+    batched route raises *that* ceiling to two requests' worth (`LotManifestScan.downloadBytes`,
     24 MB) precisely because its batches are separate requests — a long gallery no longer has to fit in
     one — and whatever is past the ceiling either way is reported rather than silently applied:
     `ValuationOutcome` carries `imagesAvailable`/`imagesSent`/`imagesSkipped`, so the console can say
@@ -1884,18 +1897,20 @@ driving a consumer web page" is not, deliberately.
     batch over an accounting list. The temperature is the batcher's on both (`manifestTemperature`, `0` —
     extraction, not judgement), so the same pallet read twice counts the same twice whichever model read
     it.
-    **(c) The setting, and the three states that leave it inert.** `AppSettings.identityProvider` is
+    **(c) The setting, and the three states that leave it inert.** `AppSettings.photoProvider` is
     `.same` / `.gemini` / `.deepSeek`, and `.same` is the default: one provider for both jobs, which is
     what every install did before this existed, and what an absent or unrecognised stored value reads as,
     so a preference file that predates the split reads as *one provider, as before* rather than as a run
-    pointed at a service nobody chose. The row is **Reads manifests** in the Account sheet, above the two
+    pointed at a service nobody chose. The row is **Evaluate photos with** in the Account sheet, above the two
     credential sections, and its menu names the appraiser it would follow (*Same as appraiser
     (DeepSeek)*), because *Same* alone does not say what it is the same as. It is always drawn — a
-    preference an operator has read about should be findable when they go looking — and disabled while
-    there is nothing to hand over: only the batched route has a manifest, so the choice does nothing while
-    **Appraise with** is Gemini (frame by frame, an identity pass of a different shape, not one that can
-    be handed over without switching the route) or while **Photos / request** is Off. The rule is stated
-    once, as `AppSettings.runsSplitIdentity` — batching *and* a different provider named — so the picker's
+    preference an operator has read about should be findable when they go looking — and enabled whenever
+    a **Photos / request** width is set (`AppSettings.canNamePhotoProvider`), because a manifest is read
+    in batches: with a width and the appraiser's own provider named there is nothing to hand over, and
+    with a width and somebody else named there is. (Deviation 40 generalised this row — it is no longer
+    inert while **Appraise with** is Gemini, because naming DeepSeek there is exactly what turns the
+    batched route on.) The rule is stated
+    once, as `AppSettings.runsSplitPhotos` — batching *and* a different provider named — so the picker's
     help, the footnote, the panel's tooltip, Run Tuning's tail and the coordinator all ask the same
     question and none of them can invent a fourth state. `.deepSeek` is spelled out rather than folded
     into `.same` so that the operator's choice survives switching **Appraise with** to Gemini and back.
@@ -1906,7 +1921,7 @@ driving a consumer web page" is not, deliberately.
     fields. The appraiser is asked first and without a role phrase, because every route needs its key;
     the identity provider is reported as `a Gemini key (the manifest half)`, because a split run buys two
     things from two providers and only one of them was ever needed to price anything. When the *identity*
-    key is what is missing the warning gives both ways out — paste one, or put **Reads manifests** back on
+    key is what is missing the warning gives both ways out — paste one, or put **Evaluate photos with** back on
     *Same as appraiser* — and the sheet's footnote grows a sentence while a split is on saying which key
     sees which half: the reader gets the photographs, the appraiser the manifest it was read into plus the
     listing text, and neither is ever sent the other's half. A key the run would not spend is not a gap:
@@ -1916,7 +1931,7 @@ driving a consumer web page" is not, deliberately.
     reader's model ID and stays `nil` on every route that read its own manifest — including the
     frame-by-frame one, where the model that priced the lot is the model that read it — so the settled
     console line grows `and gemini-3.8-flash (manifest)` only when there really were two models. The
-    Account tooltip's summary grows `manifests read by Gemini gemini-3.8-flash`, the status line, the scan
+    Account tooltip's summary grows `photographs read by Gemini gemini-3.8-flash`, the status line, the scan
     log and the sheet's footer grow `, manifest read on Gemini gemini-3.8-flash`
     (`AppSettings.identityRouteSummary`, empty when there is no split, because a line that already names
     the model doing the work should not grow a clause about a setting that is off), and Run Tuning's
@@ -1943,7 +1958,62 @@ driving a consumer web page" is not, deliberately.
 
 ---
 
-Selectors live in data, not code: edit `ScrapeProfilePresets.genericBase()` or add a new
+40. **The photograph half is symmetric: either provider can read a lot's photographs, and the appraiser
+    prices what it read.** Deviation 39 made the reading half a role — but in one direction only, and only
+    on one route: the manifest pipeline (split the gallery into batches, read them, fold the inventory,
+    price it) lived inside `DeepSeekValuationService`, so the role was inert unless **Appraise with** was
+    DeepSeek *and* a **Photos / request** width was set, and a Gemini-priced run could buy its photographs
+    from nobody but itself. Tier 5 of `docs/manifest-identity-plan.md` moves the route out of the transport
+    and the role becomes two-sided.
+    **(a) The route is one algorithm, in `Services/LotManifestScan.swift`.** `LotPhotoScan` already had this
+    shape for the per-photograph path — provider-independent, handed a `read` closure and an `aggregate`
+    closure — and the manifest route is now its sibling, handed `read` and `price`. Everything that decides
+    *what happens* lives there and nowhere else: the grouping that leaves a repeated *picture* out of the
+    batches, the split into batches of **Photos / request** frames, the fold in gallery order
+    (`PalletManifest.absorb(_:)`), the accounting of the frames a batch said nothing about
+    (`manifestGap`), the tolerance of a failed batch (a hole in the inventory, never a failed lot), the
+    fall back when nothing priceable came of it — reported to the console before the caller's fallback
+    takes over — and the rethrow of a cancellation. The transports keep only what is theirs: how to ask a
+    batch question, and how to ask for a price. `ManifestPricingService` (`priceManifest(_:)` over a
+    `ManifestPriceRequest`, one reply-sized piece of a settled manifest at a time) is the second half of
+    the seam, so both transports fill *both* roles and the direction becomes a wiring decision rather than
+    a second route.
+    **(b) The appraiser owns the route; the reader is a dependency.** A reader is built with
+    `photoScan: .disabled` and `photosPerRequest: 0`, because the manifest route belongs to the appraiser:
+    it folds the batches and prices the inventory, with the reader filling the vision half. So
+    `GeminiValuationService` gained the batched branch DeepSeek always had (`manifestReader`,
+    `photosPerRequest`) and a `priceManifest(_:)` — a text-only `:generateContent` call carrying the pricing
+    prompt with `LotValuationPrompt.itemsSchema` as `response_schema` — and
+    `AnalysisCoordinator.manifestReader(for:)` now builds whichever provider the operator named, in either
+    direction (the `case .deepSeek` that used to answer `nil` as unreachable returns a DeepSeek reader).
+    The fallbacks are the appraiser's, as before: a manifest route that produces nothing falls through to
+    that transport's own passes, trimmed to one request's inline budget.
+    **(c) The rule, restated for two directions.** `AppSettings.batchesPhotographs` is a width *and* a
+    reader that can use it: `manifestProvider == .deepSeek` (the transport whose native shape a batch is)
+    *or* a reader that is somebody other than the appraiser (the split). `runsSplitPhotos` is then the split
+    alone. A Gemini-read Gemini run is the one combination where a width means nothing, because that gallery
+    is read frame by frame on **Photos / scan** (`Whole gallery (one request)` being the other end of the
+    same row) whatever the width says. The row is **Evaluate photos with**, and its stored key and raw
+    values are unchanged (`identityProvider`, `.same` / `.gemini` / `.deepSeek`), so an install that had
+    named a reader keeps its choice across the rename.
+    **(d) What the two halves record.** `ValuationOutcome.identityModelID` carries the reader's model
+    whenever the reader was not the appraiser — a DeepSeek model on a Gemini-priced row now, as a Gemini
+    model on a DeepSeek-priced row before — and `passes` counts batch plus pricing requests in either
+    direction. The console's clause, the Account tooltip, the status line, the sheet's footnote and Run
+    Tuning's **Photos / request** tail all read those same two facts, so "who read this" and "who priced
+    it" cannot disagree between surfaces.
+    **Harness:** check 50e drives the *new* direction end to end through two stub hosts — the gallery down,
+    one batch read on `api.deepseek.com` with the DeepSeek key, the batcher's own question and instruction
+    and `temperature: 0`, then one pricing request on `generativelanguage.googleapis.com` with the Gemini
+    key, the manifest as JSON (identifiers and counts included), `items` required by `response_schema`, not
+    one photograph, and the app's ordinary warmth — asserting an outcome priced by Gemini that names
+    `deepseek-flash` as the model which read what it priced, two passes, and the folded inventory on the
+    run. Check 50b grew the rule's other end: the width off leaves the role inert in that direction too,
+    and DeepSeek named as its own reader is not a split. Checks 33, 37, 38, 39 and 44–50 are unchanged and
+    still green, which is what says the extraction was a move rather than a rewrite.
+
+---
+
 `ScrapeProfile` and hand it to `AuctionScraperService(profile:)`. Every list is tried in order,
 most specific first. Nothing in `ScraperScript.swift` has to change.
 
@@ -2047,8 +2117,8 @@ when a card carries three links.
 | An **Eval** reads the card's teaser rather than the full copy | `lotPageDescriptionSelectors` matched nothing on the lot page — the site keeps its copy somewhere the profile does not name, or serves it only to a signed-in session. Add the container (the block itself first, the column second) and re-**Eval**. |
 | The log says "the lot page could not be read" | The scan fell back to the card's thumbnails and the card's teaser. Usual causes: the page needed a login the session did not have, or the site served a challenge page. Open the auction page (the **info** glyph) to see what the site is returning. A gallery built in JavaScript is not by itself the reason — its strip is read from the page's own data blob when the addresses share the gallery's folder (see the row above) — so this is a page the reader could not get at, not one it could not parse. |
 | Rows show `empty model answer` on DeepSeek | JSON mode returned nothing even after the automatic re-ask (DeepSeek documents this failure mode). Re-run the lot; it is a per-call coin flip, not a configuration problem. |
-| The status line says a **Gemini** key is missing while **Appraise with** is DeepSeek | Expected while **Reads manifests** names Gemini: a split run buys the manifest from Gemini and the prices from DeepSeek, so it needs both keys and the missing one is reported as `a Gemini key (the manifest half)` (deviation 39). Paste one into its section, or set **Reads manifests** back to *Same as appraiser* to read the batches on DeepSeek itself. The same absent key is no gap at all while the run reads its own batches — the dot and the status line follow the setting, not the box. |
-| **Reads manifests** is greyed out in Account | Nothing to hand over yet: only the batched route has a manifest, so the row applies while **Appraise with** is DeepSeek *and* **Photos / request** in Run Tuning carries a width. Gemini reads a gallery frame by frame — an identity pass of a different shape, not one that can be handed over without switching the route — so the picker stays disabled there. The row's own tooltip says which of the two settings is missing. |
-| I named an identity provider and the console says nothing about it | The split is inert, and three states do that: **Photos / request** is `Off`, **Appraise with** is Gemini, or **Reads manifests** is back on *Same as appraiser*. Only a run with genuinely two models grows the clause — `manifest read on Gemini gemini-3.8-flash` on the loading line, the scan log and the sheet's footer (deviation 39) — because a console full of clauses about a setting that is off is worse than silence. Run Tuning's **Photos / request** help says who receives the batches that row sizes, which is where to look first. |
+| The status line says a **Gemini** key is missing while **Appraise with** is DeepSeek | Expected while **Evaluate photos with** names Gemini: a split run buys the manifest from Gemini and the prices from DeepSeek, so it needs both keys and the missing one is reported as `a Gemini key (the manifest half)` (deviation 39). Paste one into its section, or set **Evaluate photos with** back to *Same as appraiser* to read the batches on DeepSeek itself. The same absent key is no gap at all while the run reads its own batches — the dot and the status line follow the setting, not the box. |
+| **Evaluate photos with** is greyed out in Account | It is waiting for a width: a manifest is read in batches, so the row applies once **Photos / request** in Run Tuning carries one (deviation 40). Naming a provider cannot invent a route either — with *Same as appraiser* left on, or Gemini named while Gemini appraises, the gallery is read frame by frame on **Photos / scan**, and the row's own tooltip says so in those words. It is enabled whenever a width is set, deliberately, because with Gemini appraising, naming DeepSeek here *is* what turns the batched route on. |
+| I named a photograph provider and the console says nothing about it | The role is inert, and three states do that: **Photos / request** is `Off`, **Evaluate photos with** is back on *Same as appraiser*, or Gemini is both appraising and reading — where a gallery is read frame by frame on **Photos / scan** whatever the width says. Only a run with genuinely two models grows the clause — `manifest read on Gemini gemini-3.8-flash`, or `manifest read on DeepSeek deepseek-flash` on a Gemini-priced row (deviations 39–40) — because a console full of clauses about a setting that is off is worse than silence. Run Tuning's **Photos / request** help says who receives the batches that row sizes, which is where to look first. |
 | One settled manifest line names two models | Correct while a split is on: the clause `and gemini-3.8-flash (manifest)` is the model that *read* the inventory, next to the appraiser's model that priced it (`ValuationOutcome.identityModelID`). Every other route stays silent, because there the model that priced the lot is the model that read it. |
 

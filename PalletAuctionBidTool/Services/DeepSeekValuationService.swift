@@ -42,7 +42,7 @@ import Foundation
 ///
 /// ## Who reads the batches is a choice (Tier 4)
 /// The route's two halves are separable, and this service only owns the second by right. Given a
-/// `manifestService` (`AppSettings.identityProvider`, `ManifestService`), the batches are read by
+/// `manifestService` (`AppSettings.photoProvider`, `ManifestService`), the batches are read by
 /// *that* transport's model and the manifest it returns is priced here — so the vision half can be
 /// bought from the model that reads a carton best while the text half stays on the cheaper key. With
 /// none given — the default — this transport reads its own batches, exactly as it did before the
@@ -84,34 +84,6 @@ struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked S
 
     /// Caps the answer so a runaway JSON object cannot be billed in full.
     static let maxOutputTokens = 3_000
-
-    /// Manifest batches in flight at once.
-    ///
-    /// The pacer still spaces the requests themselves, so this only decides how much of a slow
-    /// provider's latency is hidden — and unlike the per-photograph path there is no store to consult
-    /// first, so every batch is a real request. Three matches the batch width a run of **Price all**
-    /// uses and the concurrency the thorough path defaults to, and DeepSeek's documented ceiling is
-    /// 2500 requests in flight rather than a per-minute quota, so there is room for it many times over.
-    static let manifestBatchesInFlight = 3
-
-    /// Ceiling on how much of a gallery the batched route downloads at all, in bytes.
-    ///
-    /// Two requests' worth, rather than the single request the other routes are bounded by: the whole
-    /// point of batching is that a long gallery no longer has to fit in one request, so the download
-    /// ceiling is what keeps "every photograph" true for a lot with forty of them. It is not unlimited
-    /// on purpose — the frames are held in memory as base64 strings while they are sent, and three lots
-    /// are appraised at a time — so a gallery past this is *reported* as skipped rather than quietly
-    /// dropped (`LotImageDownload.overBudget`).
-    static let manifestDownloadBytes = 2 * LotImageLoader.defaultTotalBytes
-
-    /// Manifest items one **pricing** request asks for.
-    ///
-    /// The batched route's second half is text-only, so the only thing bounding it is how much a model can
-    /// enumerate in one reply: the app's own single-pass prompt caps itself at twelve line items for that
-    /// reason, and an answer truncated mid-object decodes as a failure rather than as a partial valuation.
-    /// A pallet's inventory is one request as often as not; a warehouse's is priced in a few complete
-    /// replies (`PalletManifest.batches(ofSize:)`).
-    static let manifestItemsPerPriceRequest = 12
 
     /// Brief pause before re-asking after an empty answer. Short on purpose: that failure is a
     /// coin flip rather than a server telling us to back off.
@@ -164,7 +136,7 @@ struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked S
     let store: PhotoReadingStore
 
     /// The service that reads this service's manifest batches, when the identity role belongs to
-    /// another provider (`ManifestService`, `AppSettings.identityProvider`).
+    /// another provider (`ManifestService`, `AppSettings.photoProvider`).
     ///
     /// `nil` — the default — means this transport batches itself: a run's own key reads the gallery
     /// and prices what it read, which is every install that has not asked for a split. Given a
@@ -226,7 +198,7 @@ struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked S
         var download = await LotImageLoader.download(
             candidates,
             maxBytes: maxImageBytes,
-            totalBytes: photosPerRequest > 0 ? Self.manifestDownloadBytes : maxTotalImageBytes,
+            totalBytes: photosPerRequest > 0 ? LotManifestScan.downloadBytes : maxTotalImageBytes,
             session: session
         )
 
@@ -262,7 +234,7 @@ struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked S
             // download hold more). Whatever the trim drops is counted as skipped, exactly as a frame the
             // download itself could not take is, so the row and the console keep saying `40 of 46` rather
             // than quietly reporting fewer.
-            let sendable = Self.withinOneRequest(download.images, budget: maxTotalImageBytes)
+            let sendable = LotManifestScan.withinOneRequest(download.images, budget: maxTotalImageBytes)
             if sendable.count < download.images.count {
                 let dropped = Array(download.images.dropFirst(sendable.count))
                 download.images = sendable
@@ -414,20 +386,16 @@ struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked S
     /// Runs the batched route for one lot: one **manifest batch** per chunk of the gallery, then the
     /// pricing requests over the inventory they add up to (one per dozen lines, so ordinarily one).
     ///
-    /// The gallery is grouped before anything is sent (`PhotoFrameGrouping`), and a frame that is the
-    /// *same picture* as an earlier frame is left out: an auction gallery that lists one photograph twice
-    /// — a re-listed lot, the same zoom image served at two addresses — is one photograph, and a batch
-    /// carrying it twice would be asking the model to reconcile it against itself. Only that claim is
-    /// acted on here; a frame folded on its decoded barcode is still sent, because its pixels are the only
-    /// place a count of the goods can come from. The batches therefore name the gallery numbers they hold
-    /// rather than a range of them (`LotManifestPrompt.runPhrase(_:)`), and each batch's own frames plus
-    /// the repeated photographs they stand for are what the readout's "answered" counts.
+    /// The route itself — the grouping, the batches, the fold, the accounting and the two passes — is
+    /// `LotManifestScan`'s, and is written once for both transports. What this method decides is *who reads
+    /// the batches*: with a `manifestService` injected the photographs go to that provider and the prices
+    /// stay here (`AppSettings.photoProvider`), and with none this transport reads its own gallery exactly as
+    /// it did before the role existed.
     ///
-    /// Returns `nil` when the route could not produce a valuation — every batch failed, the batches
-    /// found nothing sellable, or the pricing pass failed — with the reason already reported to the
-    /// console, so the caller's fallback is free to take over. A cancelled run is *thrown* instead, as
-    /// everywhere else in this file: a stopped run must not fall back into a request nobody is waiting
-    /// for.
+    /// Returns `nil` when the route could not produce a valuation — every batch failed, the batches found
+    /// nothing sellable, or the pricing pass failed — with the reason already reported to the console, so the
+    /// caller's fallback is free to take over. A cancelled run is *thrown* instead, as everywhere else in
+    /// this file: a stopped run must not fall back into a request nobody is waiting for.
     private func manifestRoute(
         subject: ValuationSubject,
         description: String,
@@ -435,203 +403,48 @@ struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked S
         labels: [LotImageEvidence],
         evidence: LotImageEvidence
     ) async throws -> ValuationOutcome? {
-        let lotNumber = subject.lotNumber
-        let galleryCount = download.images.count
+        // The identity half, handed to whichever service the operator pointed it at
+        // (`AppSettings.photoProvider`); with none named this is `self`, which is the route exactly as it
+        // always was.
+        let reader: any ManifestService = manifestService ?? self
 
-        // 0. Which of the gallery's photographs are the same picture, and so are not bought twice.
-        let repeated = await Self.repeatedPictures(in: download.images, labels: labels)
-        for view in repeated.views {
-            report(PhotoScanReport(lotNumber: lotNumber, event: .folded(view)))
-        }
-
-        // The frames that need sending, with the gallery numbers they hold: a batch has to be able to say
-        // "photographs 1, 3 and 4 of 5" for the `views` it answers to mean anything.
-        let positions = galleryCount > 0
-            ? (1...galleryCount).filter { !repeated.frames.contains($0) }
-            : []
-        guard !positions.isEmpty else { return nil }
-
-        // The gallery, split into batches that each fit one request's inline budget.
-        let batches = LotImageLoader.batches(
-            of: positions.map { download.images[$0 - 1] },
+        guard let scan = try await LotManifestScan.run(
+            subject: subject,
+            description: description,
+            images: download.images,
+            labels: labels,
+            evidence: evidence,
             width: photosPerRequest,
-            perRequestBytes: maxTotalImageBytes
+            perRequestBytes: maxTotalImageBytes,
+            read: { request in try await reader.manifestBatch(request) },
+            price: { [self] request in try await priceManifest(request) },
+            report: report
+        ) else { return nil }
+
+        return ValuationOutcome(
+            items: scan.items,
+            imagesAvailable: subject.imageURLs.count,
+            imagesSent: download.images.count,
+            imagesSkipped: download.overBudget.count,
+            modelID: modelID,
+            // Named only when the identity pass was another service's: `nil` says the model above read the
+            // manifest too, which is what every other route in the app does.
+            identityModelID: manifestService?.modelID,
+            // Every batch, plus the requests that priced them.
+            passes: scan.batches + scan.prices,
+            evidence: evidence,
+            scanRequests: scan.batches + scan.prices,
+            manifest: scan.manifest
         )
-        guard !batches.isEmpty else { return nil }
-
-        // Each batch with the gallery numbers it covers, and the frames it answers for.
-        let chunks = Self.chunked(batches, over: positions, standing: repeated.stands)
-        guard !chunks.isEmpty else { return nil }
-
-        // Every batch's answer, by batch number — so the manifest is folded in gallery order however the
-        // answers landed.
-        var answers: [ManifestBatchAnswer?] = Array(repeating: nil, count: chunks.count)
-        var firstFailure: Error?
-        var failures: [String] = []
-        // Frames with an answer behind them: read, or given up on. What the readout counts, exactly as it
-        // counts the per-photograph path's answers.
-        var answered = 0
-        var requested = 0
-
-        let width = min(Self.manifestBatchesInFlight, chunks.count)
-        await withTaskGroup(of: (Int, Result<ManifestBatchAnswer, Error>).self) { group in
-            var next = 0
-
-            while next < chunks.count {
-                if Task.isCancelled { break }
-                let index = next
-                next += 1
-                let chunk = chunks[index]
-                // The app's own reading of **this** batch's frames, not of the gallery: a barcode decoded
-                // off photograph 3 is not evidence about photograph 9 (see `LotImageDigest`).
-                let batchEvidence = Self.evidence(labels, at: chunk.positions)
-                // Announced here, from the loop that launches the request rather than from inside the
-                // task, so the console says which batch is starting and the readout gets a count the
-                // caller can vouch for.
-                report(
-                    PhotoScanReport(
-                        lotNumber: lotNumber,
-                        event: .manifesting(
-                            batch: index + 1,
-                            of: chunks.count,
-                            frames: chunk.images.count,
-                            answered: answered,
-                            total: galleryCount
-                        )
-                    )
-                )
-                group.addTask { [self] in
-                    do {
-                        // The identity half, handed to whichever service the operator pointed it at
-                        // (`AppSettings.identityProvider`); with none named this is `self`, which is
-                        // the route exactly as it always was.
-                        let reader: any ManifestService = manifestService ?? self
-                        let answer = try await reader.manifestBatch(
-                            ManifestBatchRequest(
-                                description: description,
-                                batch: index + 1,
-                                batchCount: chunks.count,
-                                positions: chunk.positions,
-                                images: chunk.images,
-                                imageCount: galleryCount,
-                                evidence: batchEvidence
-                            )
-                        )
-                        // The app's own reading of the frames this batch just answered about is folded into
-                        // its answer: the digits the reader decoded are what joins two sightings of one
-                        // carton when the batches named the goods around them differently. The batch's
-                        // account of its frames travels through unchanged — enriching items cannot change
-                        // which photographs it spoke for.
-                        let coded = ManifestBatchAnswer(
-                            items: Self.withLocalCodes(answer.items, labels: labels, positions: chunk.positions),
-                            unreadPhotos: answer.unreadPhotos
-                        )
-                        return (index, .success(coded))
-                    } catch {
-                        return (index, .failure(error))
-                    }
-                }
-                // Wait for a slot to free up once the window is full.
-                if next < chunks.count, next % width == 0, let finished = await group.next() {
-                    requested += 1
-                    collectManifest(
-                        finished,
-                        into: &answers,
-                        answered: &answered,
-                        firstFailure: &firstFailure,
-                        failures: &failures,
-                        chunks: chunks,
-                        galleryCount: galleryCount,
-                        lotNumber: lotNumber
-                    )
-                }
-            }
-
-            if Task.isCancelled { group.cancelAll() }
-            for await finished in group {
-                requested += 1
-                collectManifest(
-                    finished,
-                    into: &answers,
-                    answered: &answered,
-                    firstFailure: &firstFailure,
-                    failures: &failures,
-                    chunks: chunks,
-                    galleryCount: galleryCount,
-                    lotNumber: lotNumber
-                )
-            }
-        }
-
-        // A batch's failure is never fatal on its own; a *stopped* run is stopped, so the cancellation is
-        // rethrown rather than turned into a fallback nobody is waiting for.
-        if let firstFailure, ValuationCancellation.isCancellation(firstFailure) { throw firstFailure }
-
-        // Folded in gallery order, so the inventory reads the same whichever batch answered first.
-        var manifest = PalletManifest()
-        for answer in answers.compactMap({ $0 }) { manifest.absorb(answer) }
-
-        guard !manifest.isEmpty else {
-            report(
-                PhotoScanReport(
-                    lotNumber: lotNumber,
-                    event: .fallingBackFromManifest(
-                        reason: Self.manifestFailurePhrase(failures: failures, requested: requested)
-                    )
-                )
-            )
-            return nil
-        }
-
-        // The inventory, stated before it is priced: this is the line that says what the photographs were
-        // read to hold, and what the pricing pass is about to multiply. Then the pricing request itself,
-        // announced with the number of lines it will be asked to price.
-        report(PhotoScanReport(lotNumber: lotNumber, event: .manifestSettled(manifest)))
-        report(PhotoScanReport(lotNumber: lotNumber, event: .pricing(items: manifest.count)))
-
-        do {
-            let items = try await pricingPass(
-                lotNumber: lotNumber,
-                description: description,
-                manifest: manifest,
-                evidence: evidence
-            )
-            return ValuationOutcome(
-                items: items,
-                imagesAvailable: subject.imageURLs.count,
-                imagesSent: galleryCount,
-                imagesSkipped: download.overBudget.count,
-                modelID: modelID,
-                // Named only when the identity pass was another service's: `nil` says the model above
-                // read the manifest too, which is what every other route in the app does.
-                identityModelID: manifestService?.modelID,
-                // Every batch, plus the requests that priced them.
-                passes: requested + manifest.batches(ofSize: Self.manifestItemsPerPriceRequest).count,
-                evidence: evidence,
-                scanRequests: requested + manifest.batches(ofSize: Self.manifestItemsPerPriceRequest).count,
-                manifest: manifest
-            )
-        } catch {
-            if ValuationCancellation.isCancellation(error) { throw error }
-            report(
-                PhotoScanReport(
-                    lotNumber: lotNumber,
-                    event: .fallingBackFromManifest(
-                        reason: "the manifest was read but could not be priced "
-                            + "(\(ValuationError.describe(error)))"
-                    )
-                )
-            )
-            return nil
-        }
     }
+
 
     /// Reads one batch of a lot's photographs into manifest items: one `/chat/completions` call carrying
     /// several frames, the batch question and the manifest schema.
     ///
     /// This transport's own answer to the `ManifestService` question, and the default one: the route
     /// calls it directly while the identity role is unfilled (`manifestService`), and the operator can
-    /// name it explicitly as well (`IdentityProvider.deepSeek`).
+    /// name it explicitly as well (`PhotoProvider.deepSeek`).
     ///
     /// The frames travel as `image_url` data URLs in the same user message as the question, exactly as
     /// the single-pass photograph pass sends its gallery — the difference between the two is the
@@ -671,291 +484,37 @@ struct DeepSeekValuationService: ValuationService, ManifestService, @unchecked S
         )
     }
 
-    /// Prices a settled manifest, one **reply-sized piece** at a time: text-only requests over the
-    /// inventory, held to the same schema every other pass's answer is
-    /// (`LotValuationPrompt.itemsSchema`), so a priced manifest is indistinguishable downstream from any
-    /// other valuation.
+    /// Prices a piece of a settled manifest, in a text-only request over the inventory, held to the same
+    /// schema every other pass's answer is (`LotValuationPrompt.itemsSchema`), so a priced manifest is
+    /// indistinguishable downstream from any other valuation.
     ///
-    /// No photographs, deliberately: the goods have been identified and counted by the batches, and what
-    /// is left is a lookup — brand, model number, printed size, barcode digits — which pixels cannot
-    /// improve and which costs a fraction of what an image request does.
+    /// No photographs, deliberately: the goods have been identified and counted by the batches, and what is
+    /// left is a lookup — brand, model number, printed size, barcode digits — which pixels cannot improve and
+    /// which costs a fraction of what an image request does. How much of an inventory one request may price
+    /// is the route's business (`LotManifestScan.itemsPerPriceRequest`), so this is handed one reply-sized
+    /// piece at a time.
     ///
-    /// The inventory is walked in pieces (`PalletManifest.batches(ofSize:)`) because one reply can only
-    /// enumerate so much: asking for forty line items in one request risks an answer truncated mid-object,
-    /// which is a decode failure rather than a partial valuation. A pallet's inventory is one request as
-    /// often as not; the pieces are priced in order, sequentially, because the batches that produced the
-    /// manifest dominate the latency and an ordered console is worth more here than overlapping two small
-    /// text requests. The merged list is then put back in the order the single-pass route returns — most
-    /// valuable first — since each piece only ordered itself.
-    private func pricingPass(
-        lotNumber: String,
-        description: String,
-        manifest: PalletManifest,
-        evidence: LotImageEvidence
-    ) async throws -> [DiscoveredItem] {
-        var priced: [DiscoveredItem] = []
-
-        for piece in manifest.batches(ofSize: Self.manifestItemsPerPriceRequest) {
-            let rendered = LotManifestPrompt.render(piece)
-            let body = try requestBody(
-                systemInstruction: LotManifestPrompt.pricingSystemInstruction,
-                prompt: LotManifestPrompt.pricingPrompt(
-                    description: description,
-                    manifestText: rendered.text,
-                    itemCount: piece.count,
-                    unitCount: piece.unitCount,
-                    omitted: rendered.omitted,
-                    evidence: evidence,
-                    schemaText: Self.embeddedSchema
-                ),
-                images: []
-            )
-            let items = try decodeItems(from: try await send(body))
-            report(
-                PhotoScanReport(lotNumber: lotNumber, event: .priced(items: items.count))
-            )
-            priced.append(contentsOf: items)
-        }
-
-        return priced.sorted { $0.resaleValue > $1.resaleValue }
-    }
-    /// Files one batch's result: an answer to be folded in, or a failure to be reported and moved past.
-    ///
-    /// A failed batch is a hole in the inventory rather than a failed lot — the pallet is still worth
-    /// appraising from the batches that answered, and the console says which one was lost. A batch that
-    /// answered but left frames out of its account gets the same treatment from the other side: its
-    /// items are kept, and the frames it said nothing about are named (`PhotoScanEvent.manifestGap`),
-    /// because a photograph missing from both lists is a product the inventory may be short of.
-    private func collectManifest(
-        _ finished: (Int, Result<ManifestBatchAnswer, Error>),
-        into answers: inout [ManifestBatchAnswer?],
-        answered: inout Int,
-        firstFailure: inout Error?,
-        failures: inout [String],
-        chunks: [ManifestChunk],
-        galleryCount: Int,
-        lotNumber: String
-    ) {
-        let (index, result) = finished
-        let batch = index + 1
-
-        switch result {
-        case .success(let answer):
-            answers[index] = answer
-            answered += chunks[index].answered
-            report(
-                PhotoScanReport(
-                    lotNumber: lotNumber,
-                    event: .manifested(
-                        batch: batch,
-                        of: chunks.count,
-                        items: answer.items.count,
-                        answered: answered,
-                        total: galleryCount
-                    )
-                )
-            )
-            // What the batch did *not* account for, if anything: the frames of its own batch that it
-            // named in no item and declared in no `unreadPhotos` list.
-            let gap = answer.unaccountedFrames(among: chunks[index].positions)
-            if !gap.isEmpty {
-                report(
-                    PhotoScanReport(
-                        lotNumber: lotNumber,
-                        event: .manifestGap(batch: batch, of: chunks.count, frames: gap)
-                    )
-                )
-            }
-        case .failure(let error):
-            if firstFailure == nil { firstFailure = error }
-            let reason = ValuationError.describe(error)
-            failures.append(reason)
-            report(
-                PhotoScanReport(
-                    lotNumber: lotNumber,
-                    event: .manifestFailed(
-                        batch: batch,
-                        of: chunks.count,
-                        answered: answered,
-                        total: galleryCount,
-                        reason: reason
-                    )
-                )
-            )
-        }
-    }
-
-    /// The leading frames of a downloaded set that fit **one** request, in gallery order.
-    ///
-    /// Needed only when a route falls back out of the batched one: its download ceiling is wider than a
-    /// single request (`manifestDownloadBytes`) because its batches *are* separate requests, while the
-    /// per-photograph plan's reconciliation and the two-pass photograph pass both put what is left in one.
-    /// A frame that does not fit ends the walk rather than being stepped over — what follows it in the
-    /// gallery is a later view of the same pallet, so a tail that did not travel is easier to explain than
-    /// a hole in the middle — and the frames the walk leaves behind are reported as skipped, not dropped.
-    private static func withinOneRequest(_ images: [LotImage], budget: Int) -> [LotImage] {
-        var kept: [LotImage] = []
-        var used = 0
-        for image in images {
-            guard used + image.byteCount <= budget else { break }
-            kept.append(image)
-            used += image.byteCount
-        }
-        return kept
-    }
-
-    /// The gallery's batches, each with the gallery numbers its frames hold.
-    ///
-    /// `LotImageLoader.batches(of:width:perRequestBytes:)` takes the frames in gallery order, so a batch
-    /// is a run of the frames it was handed — but not necessarily a run of the *gallery*, because a
-    /// photograph the gallery lists twice travels once (`PhotoFrameGrouping`). A batch therefore carries
-    /// its gallery numbers instead of a range of them, and those numbers are what the prompt states and
-    /// what the model's `views` come back in. Built here as one immutable value rather than assembled in
-    /// the route, so the batch tasks capture a constant.
-    private static func chunked(
-        _ batches: [[LotImage]],
-        over positions: [Int],
-        standing: [Int: Int]
-    ) -> [ManifestChunk] {
-        var chunks: [ManifestChunk] = []
-        var cursor = 0
-        for batch in batches {
-            let held = Array(positions[cursor..<(cursor + batch.count)])
-            chunks.append(
-                ManifestChunk(
-                    images: batch,
-                    positions: held,
-                    answered: held.reduce(0) { $0 + (standing[$1] ?? 1) }
-                )
-            )
-            cursor += batch.count
-        }
-        return chunks
-    }
-
-    /// The app's own reading of the frames at `positions` (`LotImageDigest`).
-    ///
-    /// `labels` is index-aligned with the downloaded gallery and may be shorter than it — the reader stops
-    /// rather than reading a frame it cannot decode — so a missing reading is simply empty, exactly as
-    /// `LotPhotoScan` treats it.
-    private static func evidence(_ labels: [LotImageEvidence], at positions: [Int]) -> LotImageEvidence {
-        LotImageDigest.merge(
-            positions.compactMap { labels.indices.contains($0 - 1) ? labels[$0 - 1] : nil }
+    /// This transport's answer to the `ManifestPricingService` question, and the default one: the route calls
+    /// it directly while the appraiser prices its own manifest — which is every run whose photographs were
+    /// read here — and it is what prices a manifest another provider read.
+    func priceManifest(_ request: ManifestPriceRequest) async throws -> [DiscoveredItem] {
+        let rendered = LotManifestPrompt.render(request.manifest)
+        let body = try requestBody(
+            systemInstruction: LotManifestPrompt.pricingSystemInstruction,
+            prompt: LotManifestPrompt.pricingPrompt(
+                description: request.description,
+                manifestText: rendered.text,
+                itemCount: request.manifest.count,
+                unitCount: request.manifest.unitCount,
+                omitted: rendered.omitted,
+                evidence: request.evidence,
+                schemaText: Self.embeddedSchema
+            ),
+            images: []
         )
+        return try decodeItems(from: try await send(body))
     }
 
-    /// One batch of the gallery as a request to send.
-    private struct ManifestChunk: Sendable {
-
-        /// The frames that travel with the request, in gallery order.
-        var images: [LotImage]
-
-        /// The gallery numbers of those frames — what the prompt states, and what `views` is answered in.
-        var positions: [Int]
-
-        /// How many of the gallery's photographs this batch answers for: its own frames, plus the
-        /// repeated photographs each of them stands for. What the readout's "answered of total" counts.
-        var answered: Int
-    }
-
-    /// The frames of a gallery that are provably the same photograph as an earlier frame, and so are not
-    /// sent in the batches (`PhotoFrameGrouping`).
-    private struct RepeatedPictures {
-
-        /// Gallery numbers the batches leave out.
-        var frames: Set<Int> = []
-
-        /// A gallery number that *is* sent → how many frames it answers for, its own included.
-        var stands: [Int: Int] = [:]
-
-        /// One entry per frame left out, for the console — the claim, and where the frame went.
-        var views: [PhotoView] = []
-    }
-
-    /// Asks `PhotoFrameGrouping` which of a gallery's frames are the same photograph, and keeps the claims
-    /// this route can act on.
-    ///
-    /// Only `PhotoView.Reason.samePicture` is kept. A frame folded on its decoded barcode shows the same
-    /// *product* from another angle, and this route's whole job is counting goods from photographs — so
-    /// leaving that frame out would trade a count nothing can recover for one image's worth of request.
-    /// Identical pixels carry no such risk: there is nothing in the second copy the first does not show,
-    /// which is why the thorough path is willing to read a repeated frame once and carries the other into
-    /// its reconciliation as an image.
-    ///
-    /// The grouping is asked with the whole gallery as its ceiling, because every frame on this route is
-    /// read: there is no per-photograph limit for a frame to fall past here.
-    private static func repeatedPictures(
-        in images: [LotImage],
-        labels: [LotImageEvidence]
-    ) async -> RepeatedPictures {
-        let grouping = await PhotoFrameGrouping.group(
-            images: images,
-            labels: labels,
-            limit: images.count
-        )
-
-        var repeated = RepeatedPictures()
-        for view in grouping.views {
-            let folds = view.folds.filter { $0.reason == .samePicture }
-            guard !folds.isEmpty else { continue }
-            repeated.frames.formUnion(folds.map(\.frame))
-            repeated.stands[view.representative, default: 1] += folds.count
-            repeated.views.append(PhotoView(representative: view.representative, folds: folds))
-        }
-        return repeated
-    }
-
-    /// One batch's answer with the app's own reading of the frames it named folded in.
-    ///
-    /// This is what makes the identifier question (`ManifestItem.isSameProduct(as:)`) answerable when the
-    /// digits were visible in one batch's photographs and not another's. A batch is told what the reader
-    /// found on *its* frames, and the model is asked to quote a code it can see — but what the fold needs
-    /// is not an answer about a code, it is the code itself, on the item, in the gallery's numbering. So
-    /// the reader's decodes for each frame an item was seen in are appended to that item's identifiers
-    /// here, on this machine, where they are facts rather than readings.
-    ///
-    /// Only frames **this batch** carried are consulted, and only the frames the item itself names: a
-    /// `views` entry outside the batch is a slip by the model, and honouring it would attribute another
-    /// frame's codes to this item.
-    ///
-    /// - Parameters:
-    ///   - items: the batch's answer, as decoded.
-    ///   - labels: the reader's per-frame readings, index-aligned with the downloaded gallery.
-    ///   - positions: the gallery numbers of the frames the batch carried.
-    private static func withLocalCodes(
-        _ items: [ManifestItem],
-        labels: [LotImageEvidence],
-        positions: [Int]
-    ) -> [ManifestItem] {
-        var enriched = items
-        for (index, item) in enriched.enumerated() {
-            for view in item.views where positions.contains(view) {
-                guard labels.indices.contains(view - 1) else { continue }
-                let reading = labels[view - 1]
-                for code in reading.barcodes + reading.identifiers where !enriched[index].identifiers.contains(
-                    where: { $0.caseInsensitiveCompare(code) == .orderedSame }
-                ) {
-                    enriched[index].identifiers.append(code)
-                }
-                // The wording the reader made out stands in for a batch that named the goods around the
-                // label rather than on it, and only ever fills a blank: a batch that read the label keeps
-                // what it read (`ManifestItem.merge(_:)` makes the same choice the other way round).
-                if enriched[index].labelText.isEmpty, let wording = reading.labelText.first {
-                    enriched[index].labelText = wording
-                }
-            }
-        }
-        return enriched
-    }
-
-    /// Why the batched route came back with nothing, in one clause, for the console.
-    private static func manifestFailurePhrase(failures: [String], requested: Int) -> String {
-        guard let first = failures.first else { return "the batches read no goods" }
-        guard requested > 1, failures.count < requested else {
-            return "no batch could be read (\(first))"
-        }
-        return "\(failures.count) of \(requested) batch(es) could not be read (\(first))"
-    }
 
     /// Reads **one** photograph: one `/chat/completions` call carrying the single-image question, the
     /// single-image reader output and the per-photograph schema.

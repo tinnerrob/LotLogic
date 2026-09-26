@@ -379,12 +379,12 @@ struct ControlPanelView: View {
     private var settingsSummary: String {
         var parts: [String] = [settings.email.isEmpty ? "no site login" : settings.email]
         parts.append(contentsOf: settings.providerKeyStates.map(\.summary))
-        // Which model reads a batched run's manifests, when that is not the appraiser: the states above
-        // name each provider's *appraising* model, and a split run points one section's model at a
-        // different job entirely (Tier 4).
-        if settings.runsSplitIdentity {
+        // Which model reads the photographs, when that is not the appraiser: the states above name each
+        // provider's *appraising* model, and a split run points one section's model at a different job
+        // entirely (Tier 5).
+        if settings.runsSplitPhotos {
             parts.append(
-                "manifests read by \(settings.manifestProvider.displayName) \(settings.manifestModelID)"
+                "photographs read by \(settings.manifestProvider.displayName) \(settings.manifestModelID)"
             )
         }
         return parts.joined(separator: "  ·  ")

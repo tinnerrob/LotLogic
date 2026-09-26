@@ -124,9 +124,9 @@ struct RunTuningSheet: View {
     /// buys a per-minute quota a forty-frame lot and gives up the per-frame readings with it. It is
     /// listed first because it is the cheapest thing on the menu and the counts only get dearer.
     ///
-    /// Disabled while DeepSeek is reading the gallery in batches, because that route *is* this one's
-    /// replacement on that transport and a setting that did nothing while a run batched would be a
-    /// control that lies.
+    /// Disabled while a manifest route is reading the gallery in batches, because that route *is* this
+    /// one's replacement on that transport and a setting that did nothing while a run batched would be a
+    /// control that lies (`AppSettings.batchesPhotographs`).
     private var photoScanPicker: some View {
         Picker("Photos / scan", selection: $settings.photosPerScan) {
             Text(wholeGalleryLabel).tag(AppSettings.wholeGalleryPerScan)
@@ -178,30 +178,35 @@ struct RunTuningSheet: View {
             + "readings and no trail from a figure back to a picture, and only the frames that fit "
             + "the request's inline budget; any it leaves out are counted on the row rather than "
             + "dropped. DeepSeek reads a gallery "
-            + "in batches instead — that is what Photos / request is for — which is why this row is "
-            + "unavailable while it does."
+            + "in batches instead — that is what Photos / request is for, and Evaluate photos with in "
+            + "Account is what points DeepSeek at it — which is why this row is "
+            + "unavailable while that route is on."
     }
 
     private var photoRequestHelp: String {
-        "How many of a lot's photographs travel in ONE request on a provider that reads a gallery in "
-            + "batches (DeepSeek). The batches are folded into a manifest of what the pallet holds and "
+        "How many of a lot's photographs travel in ONE request when the gallery is read in batches — the "
+            + "route DeepSeek has, and the one Evaluate photos with in Account names. The batches are "
+            + "folded into a manifest of what the pallet holds and "
             + "that manifest is then priced in text-only requests — one per dozen inventory lines — so a "
             + "twelve-photograph lot at 6 costs three requests instead of thirteen — and the frames that "
             + "show the same carton are read together, so it is counted once. \(batchOffLabel) reads each "
-            + "photograph on its own instead (Photos / scan). Gemini always reads frame by frame and "
-            + "ignores this row."
+            + "photograph on its own instead (Photos / scan). This row is inert while Gemini both "
+            + "appraises and reads, because that gallery is read frame by frame; point Evaluate photos "
+            + "with at DeepSeek to buy the reading half there, and the width below sizes the batches it "
+            + "reads — whichever provider then prices them."
             + manifestReaderTail
     }
 
     /// Who actually receives the batches this row sizes, which is DeepSeek unless Account says otherwise.
     ///
-    /// Two facts belong here because this row *is* the batching switch: a run that batches on one
-    /// provider and prices on another is set up in two sheets, and an operator reading this menu is
-    /// exactly the person who needs to know that the frames they just sized are going somewhere else.
+    /// Two facts belong here because this row *is* the batching switch: a run that reads on one provider
+    /// and prices on another is set up in two sheets, and an operator reading this menu is exactly the
+    /// person who needs to know that the frames they just sized are going somewhere else — or, with the
+    /// split pointed the other way, that somebody else's frames are coming back here to be priced.
     private var manifestReaderTail: String {
-        guard settings.runsSplitIdentity else { return "" }
-        return " This run's batches are read by \(settings.manifestProvider.displayName) "
-            + "\(settings.manifestModelID) — see Reads manifests in Account — and priced by "
+        guard settings.runsSplitPhotos else { return "" }
+        return " This run's photographs are read by \(settings.manifestProvider.displayName) "
+            + "\(settings.manifestModelID) — see Evaluate photos with in Account — and priced by "
             + "\(settings.provider.displayName) \(settings.activeModelID)."
     }
 

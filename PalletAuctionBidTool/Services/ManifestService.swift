@@ -49,7 +49,7 @@ struct ManifestBatchRequest: Sendable {
 /// frames into a manifest and then priced that inventory in text-only requests. The two jobs want
 /// different models: reading a carton's printed identifiers and its count off a photograph is a
 /// vision problem, and pricing a barcode afterwards is not. So the identity half is a role any
-/// transport can fill (`AppSettings.identityProvider`), and `DeepSeekValuationService` takes one as
+/// transport can fill (`AppSettings.photoProvider`), and `DeepSeekValuationService` takes one as
 /// an optional dependency: with none given it reads its own batches exactly as it always has, and
 /// with one given the frames' identity is decided by that model while the prices stay here.
 ///
@@ -73,4 +73,58 @@ protocol ManifestService: Sendable {
     /// Throws for a refused or malformed request; the *route* decides what a failed batch costs (a
     /// hole in the inventory, reported to the console, rather than a failed lot).
     func manifestBatch(_ request: ManifestBatchRequest) async throws -> ManifestBatchAnswer
+}
+
+/// One **piece** of a settled manifest, as the question that prices it.
+///
+/// The second role of the batched route, and the sibling of `ManifestBatchRequest`: the whole of what a
+/// pricing request *is*, so the transport that reads a lot's photographs and the transport that prices
+/// what they were read to hold can be different services without either inventing its own idea of what
+/// is being priced.
+///
+/// The manifest travels as the *value* rather than as rendered text: the transport renders it
+/// (`LotManifestPrompt.render(_:)`) and states the counts that go with it, exactly as a batch transport
+/// renders its own question — so the JSON slab a model is asked to price is always a re-encoding of the
+/// decoded inventory rather than a second copy that could drift from it.
+struct ManifestPriceRequest: Sendable {
+
+    /// The lot's listing text, or `""` when its page carried none.
+    let description: String
+
+    /// The slice of the inventory this request prices: one reply's worth of it
+    /// (`PalletManifest.batches(ofSize:)`, sized by `LotManifestScan.itemsPerPriceRequest`).
+    let manifest: PalletManifest
+
+    /// What the app's own reader found on the lot's photographs (`LotImageDigest`), so the pricing pass
+    /// can look up the product a barcode names rather than the carton it was printed on.
+    let evidence: LotImageEvidence
+}
+
+/// Turns a settled manifest into money: the **pricing** half of a batched appraisal, separated from the
+/// identity half that read the photographs (`ManifestService`).
+///
+/// The route's two halves want different things from a model. Reading a carton's printed identifiers and
+/// its count off a photograph is a vision problem; pricing the product afterwards is a lookup that pixels
+/// cannot improve. So the pricing half is a role of its own, and it is the half that stays with the
+/// appraiser: whichever provider reads a lot's photographs (`AppSettings.photoProvider`), the prices come
+/// from the one the operator chose to appraise with — which is what makes the photograph half symmetric,
+/// Gemini pricing a manifest DeepSeek read as readily as the other way round.
+///
+/// Both transports conform. They differ in how the answer's shape is *constrained* — Gemini is handed
+/// `LotValuationPrompt.itemsSchema` as `responseSchema`, so the line items' shape is enforced by the API,
+/// where DeepSeek's JSON mode can only ask for it in prose — and in nothing else: how much of an
+/// inventory one request may price is the route's business, not this protocol's, so a caller hands one
+/// reply-sized piece at a time (`LotManifestPrompt.maximumLength`).
+protocol ManifestPricingService: Sendable {
+
+    /// The model that prices a manifest — carried into the run so a figure can be traced to the model
+    /// that produced it rather than inferred from which provider paid.
+    var modelID: String { get }
+
+    /// Prices one piece of a settled manifest.
+    ///
+    /// Throws for a refused or malformed request; the *route* decides what a failed pricing request
+    /// costs (a fall back to a route that reads the gallery itself, reported to the console, rather than
+    /// a failed lot).
+    func priceManifest(_ request: ManifestPriceRequest) async throws -> [DiscoveredItem]
 }

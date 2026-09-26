@@ -41,6 +41,7 @@ swiftc -swift-version 6 -o "$out/harness" \
     "$root/PalletAuctionBidTool/Services/LotPhotoScanPrompt.swift" \
     "$root/PalletAuctionBidTool/Services/LotManifestPrompt.swift" \
     "$root/PalletAuctionBidTool/Services/ManifestService.swift" \
+    "$root/PalletAuctionBidTool/Services/LotManifestScan.swift" \
     "$root/PalletAuctionBidTool/Services/PhotoReadingStore.swift" \
     "$root/PalletAuctionBidTool/Services/GeminiValuationService.swift" \
     "$root/PalletAuctionBidTool/Services/DeepSeekValuationService.swift" \

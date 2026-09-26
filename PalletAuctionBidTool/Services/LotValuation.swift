@@ -117,7 +117,7 @@ struct ValuationOutcome: Sendable {
     var imagesSkipped: Int = 0
     var modelID: String
     /// The model that read the lot's **identity** — the manifest its inventory was priced from —
-    /// when that was a different model from `modelID` (`AppSettings.identityProvider`, Tier 4 of
+    /// when that was a different model from `modelID` (`AppSettings.photoProvider`, Tier 4 of
     /// `docs/manifest-identity-plan.md`). `nil` for every route that reads and prices with one model,
     /// which is every route but a split batched one.
     ///

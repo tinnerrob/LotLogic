@@ -155,30 +155,41 @@ enum ValuationProvider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Which service reads a lot's photographs into the manifest its inventory is priced from.
+/// Which service **reads a lot's photographs**, when the operator wants somebody other than the appraiser
+/// doing it.
 ///
-/// The batched route has always been one provider doing both jobs, and the two want different models:
-/// reading a carton's printed model number, barcode digits and count off a photograph is a **vision**
-/// problem, while pricing that barcode afterwards is a lookup that pixels cannot improve. So the
-/// identity half can be pointed at either provider while the prices stay with the appraiser
-/// (`AppSettings.identityProvider`, Tier 4 of `docs/manifest-identity-plan.md`).
+/// The two halves of a photographed appraisal want different things from a model: reading a carton's printed
+/// model number, barcode digits and count off a photograph is a **vision** problem, while pricing that
+/// barcode afterwards is a lookup that pixels cannot improve. So the photographs can be pointed at either
+/// provider while the prices stay where they are (`AppSettings.photoProvider`), and the invoices land on the
+/// two keys the two sections of Account name.
 ///
-/// Only the batched route has a manifest at all, so this is inert unless **Appraise with** is
-/// DeepSeek *and* **Photos / request** is on — see `AppSettings.runsSplitIdentity`. Gemini reads a
-/// gallery frame by frame and reconciles the readings, which is an identity pass of a different
-/// shape and not one that can be handed over without switching the route.
-enum IdentityProvider: String, CaseIterable, Identifiable, Sendable {
+/// **Both directions work, and each one is a manifest.** Whichever provider reads the gallery, its batches
+/// are folded into an inventory on this machine (`LotManifestScan`) and that inventory is priced by the
+/// **appraiser** (`ManifestPricingService`) — so a Gemini-priced run buys its photographs from DeepSeek
+/// exactly as a DeepSeek-priced run buys them from Gemini. Nothing about the two routes drifts apart to make
+/// that work: the reading half and the pricing half are roles, and each transport fills both.
+///
+/// What the setting cannot do is invent a manifest where none can run. Naming a provider changes nothing
+/// until a width is set on Run Tuning's **Photos / request** row, because a batch is the thing a manifest is
+/// read in (`AppSettings.batchesPhotographs`).
+///
+/// Gemini is the one provider with a photograph route that is not the batched one: while Gemini is *both*
+/// appraiser and reader, a gallery is read frame by frame — or in one whole-gallery request
+/// (`AppSettings.readsWholeGalleryInOneRequest`) — because that is the route Gemini has. **Photos /
+/// request** is inert there rather than a second, silent route.
+enum PhotoProvider: String, CaseIterable, Identifiable, Sendable {
 
-    /// One provider for both jobs: whoever appraises a lot also reads its manifest. The default, and
+    /// One provider for both jobs: whoever appraises a lot also reads its photographs. The default, and
     /// what every install did before the split existed.
     case same
 
-    /// Gemini reads the batches — with whichever model its own section in Account names, so the reading
-    /// half is bought on its own key and its own model, current or not.
+    /// Gemini reads the gallery — with whichever model its own section in Account names, so the reading half
+    /// is bought on its own key and its own model, current or not.
     case gemini
 
-    /// DeepSeek reads the batches itself. Spelled out rather than folded into `.same` so that the
-    /// choice survives switching **Appraise with** to Gemini and back.
+    /// DeepSeek reads the gallery, in batches of whatever **Photos / request** is set to. Spelled out rather
+    /// than folded into `.same` so that the choice survives switching **Appraise with** to Gemini and back.
     case deepSeek = "deepseek"
 
     var id: String { rawValue }

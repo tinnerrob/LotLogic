@@ -29,7 +29,12 @@ final class AppSettings {
         static let apiKey = "geminiAPIKey"
         static let modelID = "geminiModelID"
         static let provider = "valuationProvider"
-        static let identityProvider = "identityProvider"
+        /// The stored key for **Evaluate photos with**.
+        ///
+        /// Spelled as it was when the setting was called *Reads manifests*, and deliberately not renamed
+        /// with it: the raw values below are unchanged too, so an install that had named a photograph
+        /// provider keeps its choice across the rename instead of being reset to *Same as appraiser*.
+        static let photoProvider = "identityProvider"
         static let deepSeekAPIKey = "deepSeekAPIKey"
         static let deepSeekModelID = "deepSeekModelID"
         static let pageLimit = "pageLimit"
@@ -126,19 +131,20 @@ final class AppSettings {
     /// Which back end appraises lots.
     var provider: ValuationProvider
 
-    /// Which back end **reads a lot's photographs into the manifest** its inventory is priced from,
-    /// while `provider` prices that inventory (Tier 4 of `docs/manifest-identity-plan.md`).
+    /// Which back end **reads a lot's photographs**, while `provider` prices what was read
+    /// (`PhotoProvider`, `docs/manifest-identity-plan.md` Tier 5).
     ///
     /// `.same` is the whole of what every install did before this existed, and it is the default: one
-    /// provider for both jobs. Naming another provider buys the identity half from the model that reads
-    /// a carton best — a Gemini section pointed at `gemini-3.8-flash` among them — while the prices stay
-    /// on the appraiser's key, which is what keeps the reading half affordable as *only* the extraction
-    /// step (`ValuationOutcome.identityModelID`, `manifestModelID`).
+    /// provider for both jobs. Naming another provider buys the photograph half from the model that reads a
+    /// carton best — a Gemini section pointed at its own model among them — while the prices stay on the
+    /// appraiser's key, which is what keeps the reading half affordable as *only* the extraction step
+    /// (`ValuationOutcome.identityModelID`, `manifestModelID`).
     ///
-    /// Inert unless the run actually batches: only the batched route has a manifest at all, so the
-    /// choice does nothing while **Appraise with** is Gemini or **Photos / request** is Off
-    /// (`runsSplitIdentity`).
-    var identityProvider: IdentityProvider
+    /// It works in both directions, because both transports can read a batch and both can price a manifest:
+    /// a DeepSeek-priced run may buy its photographs from Gemini, and a Gemini-priced run may buy them from
+    /// DeepSeek. See `batchesPhotographs` for when the choice actually takes effect — a manifest needs a
+    /// batch, and a batch needs a width on **Photos / request**.
+    var photoProvider: PhotoProvider
 
     /// Google AI Studio key used for the Gemini REST calls.
     var apiKey: String
@@ -220,7 +226,7 @@ final class AppSettings {
         // An unrecognised or absent value is `.same`: the split is an extra, and a preference file that
         // predates it (or names a provider this build dropped) must read as "one provider, as before"
         // rather than as a run pointed at a service nobody chose.
-        identityProvider = IdentityProvider(rawValue: defaults.string(forKey: Key.identityProvider) ?? "")
+        photoProvider = PhotoProvider(rawValue: defaults.string(forKey: Key.photoProvider) ?? "")
             ?? .same
         apiKey = defaults.string(forKey: Key.apiKey) ?? ""
         modelID = defaults.string(forKey: Key.modelID) ?? GeminiValuationService.defaultModelID
@@ -310,13 +316,35 @@ final class AppSettings {
     /// anything that is not a positive ceiling.
     var readsEveryPhotograph: Bool { effectivePhotosPerScan == 0 }
 
-    /// `true` while a lot's photographs are read in **batches** rather than one at a time.
+    /// `true` while a lot's photographs are read in **batches** rather than one at a time — which is the
+    /// manifest route, whichever provider reads it.
     ///
-    /// Two things have to agree for that: the operator has to have set a batch width, *and* the selected
-    /// provider has to be the one that batches. Gemini reads a gallery frame by frame — its whole design
-    /// is one question per photograph — so the setting is inert there rather than a second silent route,
-    /// and a run cannot end up batching on the transport that has no manifest pass to batch into.
-    var batchesPhotographs: Bool { provider == .deepSeek && effectivePhotosPerRequest > 0 }
+    /// Two things have to agree for that: the operator has to have set a batch width, *and* that width has to
+    /// belong to a route this build has. A batch is read by the provider **Evaluate photos with** names —
+    /// DeepSeek, whose native shape it is, or whoever the operator pointed there — so the run batches when a
+    /// width is set and either
+    ///
+    /// * the reader is DeepSeek, which can always read a batch into a manifest and price it too, or
+    /// * the reader is somebody other than the appraiser, which is the split: one provider reads the
+    ///   photographs and the other prices the inventory (`runsSplitPhotos`).
+    ///
+    /// A Gemini-priced, Gemini-read run therefore never batches however the width is set: Gemini's own
+    /// photograph route is frame by frame (or one whole-gallery request), and **Photos / request** is inert
+    /// rather than a second, silent route. That is the one case where `effectivePhotosPerRequest > 0` does
+    /// not mean a batch, which is why the rule is written here once and read by both transports and by the
+    /// sheets instead of being re-derived at each call site.
+    var batchesPhotographs: Bool {
+        guard effectivePhotosPerRequest > 0 else { return false }
+        return manifestProvider == .deepSeek || manifestProvider != provider
+    }
+
+    /// `true` while naming a photograph provider can mean anything: a width has been set on **Photos /
+    /// request**, so a manifest route could run if the operator pointed it somewhere.
+    ///
+    /// Read by the Account sheet for the **Evaluate photos with** row's enabled state, and deliberately *not*
+    /// `batchesPhotographs`: that answers *"is this run batching?"*, which the row's own choice is part of the
+    /// answer to — a row disabled by the thing it is about could never be turned on.
+    var canNamePhotoProvider: Bool { effectivePhotosPerRequest > 0 }
 
     /// The photograph budget in words, for the run log and the status line.
     ///
@@ -463,7 +491,7 @@ final class AppSettings {
     /// `.same` answers `provider`, which is what makes the whole split a no-op for an install that has
     /// not asked for it — every caller can go through here without asking whether a split is on.
     var manifestProvider: ValuationProvider {
-        identityProvider.provider(fallingBackTo: provider)
+        photoProvider.provider(fallingBackTo: provider)
     }
 
     /// The model the manifest pass runs on.
@@ -472,15 +500,14 @@ final class AppSettings {
     /// Account names — including a model the appraiser would never be pointed at on price grounds.
     var manifestModelID: String { modelID(for: manifestProvider) }
 
-    /// `true` when this install reads its manifests on one provider and prices them on another.
+    /// `true` when this install reads its photographs on one provider and prices them on another.
     ///
-    /// Three things have to line up, and all three are choices rather than facts: something has to
-    /// batch (**Photos / request** on, **Appraise with** DeepSeek — `batchesPhotographs`), the identity
-    /// role has to be filled by a provider (`IdentityProvider`), and it has to be a different provider
-    /// from the appraiser's. Folding the first in is what keeps the setting from looking broken: an
-    /// operator who sets an identity provider and then turns batching off gets one provider doing both
-    /// jobs, which is the whole meaning of *Same as appraiser*.
-    var runsSplitIdentity: Bool {
+    /// Two things have to line up, and both are choices rather than facts: a width has to be set so that a
+    /// manifest route exists at all (**Photos / request** — `batchesPhotographs`), and the photograph role has
+    /// to be filled by a provider other than the appraiser's (`PhotoProvider`). Folding the first in is what
+    /// keeps the setting from looking broken: an operator who names a photograph provider and then turns the
+    /// width off gets one provider doing both jobs, which is the whole meaning of *Same as appraiser*.
+    var runsSplitPhotos: Bool {
         batchesPhotographs && manifestProvider != provider
     }
 
@@ -491,7 +518,7 @@ final class AppSettings {
     /// already names the model doing the work — and three quarters of a run's console lines should not
     /// grow a clause about a setting that is off.
     var identityRouteSummary: String {
-        runsSplitIdentity
+        runsSplitPhotos
             ? ", manifest read on " + manifestProvider.displayName + " " + manifestModelID
             : ""
     }
@@ -504,8 +531,8 @@ final class AppSettings {
     /// instead of saying "add a key" beside two key fields.
     var missingKeyProvider: ValuationProvider? {
         if !hasAPIKey(for: provider) { return provider }
-        let identity = manifestProvider
-        if runsSplitIdentity, !hasAPIKey(for: identity) { return identity }
+        let reader = manifestProvider
+        if runsSplitPhotos, !hasAPIKey(for: reader) { return reader }
         return nil
     }
 
@@ -516,7 +543,7 @@ final class AppSettings {
     /// split run buys two things from two providers and only the appraiser's key was ever needed to
     /// price anything. Said once here so the status line and the console agree on the phrase.
     func missingKeyRolePhrase(for missing: ValuationProvider) -> String {
-        runsSplitIdentity && missing == manifestProvider ? " (the manifest half)" : ""
+        runsSplitPhotos && missing == manifestProvider ? " (the manifest half)" : ""
     }
 
     /// The missing key as a noun phrase for a sentence: `"a Gemini key (the manifest half)"`.
@@ -616,7 +643,7 @@ final class AppSettings {
         defaults.set(email, forKey: Key.email)
         defaults.set(password, forKey: Key.password)
         defaults.set(provider.rawValue, forKey: Key.provider)
-        defaults.set(identityProvider.rawValue, forKey: Key.identityProvider)
+        defaults.set(photoProvider.rawValue, forKey: Key.photoProvider)
         defaults.set(apiKey, forKey: Key.apiKey)
         defaults.set(modelID, forKey: Key.modelID)
         defaults.set(deepSeekAPIKey, forKey: Key.deepSeekAPIKey)
@@ -646,7 +673,7 @@ final class AppSettings {
         email = ""
         password = ""
         provider = .gemini
-        identityProvider = .same
+        photoProvider = .same
         apiKey = ""
         modelID = GeminiValuationService.defaultModelID
         deepSeekAPIKey = ""

@@ -4,8 +4,10 @@
 `Tools/free-tier-harness/run.sh` passes with checks 44–46 added. **Tier 2 (E–G) is implemented too —
 harness check 48** — see *Tier 2* below for what it came to. **Tier 3 (H) is implemented as well —
 harness check 49** — see *Tier 3* below. **Tier 4's provider split (I) and the credentials work it needs
-are implemented too — harness checks 50 and 50b** — see *Tier 4* below for what it came to; part **J**
-(surfacing the duplicates a merge could not settle) is **still to do**.
+are implemented too — harness checks 50 and 50b** — see *Tier 4* below for what it came to. **Tier 5
+(K–M) is implemented as well — harness check 50e, with 50b extended** — see *Tier 5* below, which is what
+made the photograph half work in both directions. Part **J** (surfacing the duplicates a merge could not
+settle) of Tier 4 is the one item still outstanding.
 Each tier lands behind a green build and a green harness run before the next begins.
 
 **What Tier 1 actually came to, against the plan below.** A: the route groups the gallery before it
@@ -227,6 +229,71 @@ armed-provider pair.
   `DiscoveredItemRow` / the detail card.
 - **Acceptance:** two priced rows built from one carton's two batches carry the chip.
 
+## Tier 5 — the photograph half, both ways (the photograph role) — **K, L and M done**
+
+Tier 4 made the *identity* half a role another provider can fill, and stopped there: `identityProvider` was
+inert unless **Appraise with** was DeepSeek *and* a **Photos / request** width was set, because the whole
+manifest pipeline — split the gallery into batches, read them, fold the inventory, price it — lived inside
+`DeepSeekValuationService`. The app therefore offered two photograph routes, picked by **Appraise with**
+(Gemini reads frame by frame or the whole gallery; DeepSeek reads batches into a manifest), plus one
+asymmetric extra: a DeepSeek appraisal could buy its photographs from Gemini, and a Gemini appraisal could
+buy them from nobody but itself. Tier 5 makes the role symmetric and names it for what it is —
+**Evaluate photos with** (`Same as appraiser` / `Gemini` / `DeepSeek`).
+
+### K. The manifest pipeline becomes a shared orchestrator (`LotManifestScan`) — **done**
+The per-photograph route already had this shape: `LotPhotoScan.run(...)` is provider-independent and is
+handed two closures, `read` and `aggregate`. The manifest route got its sibling, moved out of
+`DeepSeekValuationService.manifestRoute` + `pricingPass` + `collectManifest` (with `chunked`, `evidence`,
+`repeatedPictures`, `withLocalCodes`, `manifestFailurePhrase`, `withinOneRequest` and the two private
+chunk structs), and handed `read` and `price` closures: group, split, read, fold, account for gaps, report
+and return `nil` on nothing priceable — written once, so the two transports cannot drift about what a batch
+is asked or what a failed batch costs. `ManifestPriceRequest` + `ManifestPricingService` became the second
+role, next to `ManifestService`: both the batch question and the pricing question are values, and either
+transport can answer either.
+- **Acceptance:** no behaviour change — checks 33, 37, 38, 39, 44–50 stayed green with no assertion
+  rewritten, which is what proves the move was a move. **Met.** The one thing the plan did not name: the
+  two constants a caller needs (`downloadBytes`, `withinOneRequest`) belong to the orchestrator rather than
+  the transport, because they exist *because* the batched route's download ceiling is wider than one
+  request — so `DeepSeekValuationService` now reads them from `LotManifestScan`.
+
+### L. Both directions — **done**
+`AppSettings.photoProvider` (`PhotoProvider.same` / `.gemini` / `.deepSeek`) names who reads a lot's
+photographs; the **appraiser prices what it read**. The route rule is one line — a run takes the manifest
+route when a width is set *and* the reader is DeepSeek or is somebody other than the appraiser:
+
+| Evaluate photos with | Appraise with | Route |
+| --- | --- | --- |
+| Gemini (*Same* or named) | Gemini | Gemini's own: per-photograph (`Photos / scan`) or whole gallery |
+| DeepSeek (*Same* or named) | DeepSeek | DeepSeek's own: batches (`Photos / request`) or per-photograph |
+| Gemini | DeepSeek | manifest route: Gemini reads (`response_schema`-enforced), DeepSeek prices — Tier 4 |
+| DeepSeek | Gemini | manifest route: DeepSeek reads, Gemini prices — **new in Tier 5** |
+
+For the new direction `GeminiValuationService` gained `priceManifest(_:)` (a text-only `:generateContent`
+call carrying `LotManifestPrompt.pricingPrompt`, held to `LotValuationPrompt.itemsSchema` as
+`responseSchema`) and a manifest branch in `value(subject:)` that runs when the coordinator hands it a
+width — plus the fallback DeepSeek has always had: a manifest route that produces nothing falls back to one
+pass over the gallery, trimmed to one request's inline budget.
+- **Acceptance:** check 50e drives the new direction end to end against two stub hosts (DeepSeek reads,
+  Gemini prices) and asserts the batch request carries the frames, the batcher's own question and the cold
+  temperature; the pricing request carries the manifest slab, no photographs and an enforced `items`
+  schema; and the outcome names both models, with the folded inventory on the run. **Met.** Check 50b grew
+  the rule's other end (the width off leaves it inert in that direction too; DeepSeek named as its own
+  reader is not a split).
+
+### M. The picker and the two run-tuning rows — **done**
+- `SiteSettingsSheet`: **Reads manifests** became **Evaluate photos with**, enabled whenever a width is set
+  (`AppSettings.canNamePhotoProvider`) rather than only while batching was already on — otherwise naming
+  DeepSeek while Gemini appraises would be unreachable, since that *is* the choice that turns the batched
+  route on. Its help has four states (no width / a width with no manifest route on this combination / a
+  width resolved back to the appraiser / a real split), the footnote and the warning say which key sees
+  which half, and the per-section chip reads *reads photographs*.
+- `RunTuningSheet`: **Photos / request** stopped claiming to be inert on Gemini ("Gemini always reads frame
+  by frame and ignores this row" is no longer true), and its tail names the reader from `photoProvider`;
+  **Photos / scan**'s row is still disabled while a manifest route is on, which is the same rule as before
+  with the reader generalised.
+- `AboutSheet`, `ControlPanelView` and the README print the new name; the stored key and raw values were
+  left alone (`identityProvider`), so no install migrates.
+
 ## Order of work
 
 1. Tier 1 (A → B → C → D) — the biggest accuracy wins, all on-device or in the fold. **Done.**
@@ -236,7 +303,11 @@ armed-provider pair.
 4. Tier 4 (I, credentials, J) — the largest surface, last, because it needs two keys and a new picker.
    **I and the credentials work are done** (harness checks 50, 50b; README deviation 39), and the Account
    sheet's two key sections plus the About sheet's key instructions landed earlier still, as deviation 36.
-   **J is next:** the "possible duplicate" chip on a priced row built from one carton's two batches.
+5. Tier 5 (K → L → M) — the photograph role generalised and pointed both ways. **Done** in one landing —
+   K (the extraction) first, verified green with no assertion changed, then L and M (the settings, the
+   wiring, the sheets) — with harness check 50e, 50b extended, and README deviation 40.
+6. Tier 4's **J** — the "possible duplicate" chip on a priced row built from one carton's two batches:
+   still the one item outstanding.
 
 Each step: build (`xcodebuild … CODE_SIGNING_ALLOWED=NO`), run `Tools/free-tier-harness/run.sh`, add
 the harness check named above, and update the README (architecture, "How one scan works", cost
@@ -252,3 +323,7 @@ tables, deviations, troubleshooting).
   and the split is optional (`.same` is the default).
 - **Gemini `responseSchema` dialect** → reuse the existing `ResponseSchemaNode` renderer, which
   already emits Google's uppercase schema form.
+- **The two-way role makes the route rule harder to hold in one's head** (Tier 5) → the rule is stated
+  once, in `AppSettings.batchesPhotographs` / `runsSplitPhotos`, and every surface (both sheets, the
+  panel tooltip, the run log, the coordinator) reads it there rather than re-deriving it; the harness
+  pins each of its four combinations, including the one where a width means nothing.
