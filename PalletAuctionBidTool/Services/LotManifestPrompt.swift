@@ -292,7 +292,10 @@ enum LotManifestPrompt {
     manifest's `modelNumber`, `identifiers`, `labelText` and `category` are the evidence you have to \
     work from.
     3. `retailValue` and `resaleValue` are totals for the LINE: the unit price multiplied by the \
-    manifest's `quantity`. Twelve units at $9.99 retail is $119.88 for the line, not $9.99.
+    manifest's `quantity`. Twelve units at $9.99 retail is $119.88 for the line, not $9.99. A line that \
+    carries a `countConflict` is one the batches read different counts for, and the manifest already \
+    holds the count the better sighting supported: price the `quantity` you were given and do not \
+    re-count it, average it or adjust it.
     4. Copy the manifest's wording into `itemName`, its `quantity` into `quantity`, and its `views` \
     into `photos`, so the table can still say which photographs a figure came off and how many units \
     the line covers.
@@ -419,6 +422,17 @@ struct ManifestPayload: Codable {
         var views: [Double]?
         var notes: String?
 
+        /// What the *fold* found rather than what a batch said: two of them read different counts for this
+        /// product, and which count the inventory kept (`ManifestItem.countConflictNote`). Absent when the
+        /// batches agreed, which is the ordinary case.
+        ///
+        /// Written here and never read back — `item(from:)` ignores it, because a conflict is a conclusion
+        /// about two batches rather than something a batch can report about itself, and no schema asks a
+        /// batch for one. It travels because the pricing pass is the only place a count becomes money: the
+        /// model is multiplying out a number the fold had to *resolve*, and rule 3 tells it what to do
+        /// about that.
+        var countConflict: String?
+
         /// The wire form of a manifest line, for the prompt that prices it. Empty fields are left out
         /// rather than sent as empty strings, the way `ValuationPayload.from(items:)` renders a line
         /// item: the model then sees the shape a batch actually produces.
@@ -435,6 +449,7 @@ struct ManifestPayload: Codable {
             confidence = item.confidence.isEmpty ? nil : item.confidence
             views = item.views.isEmpty ? nil : item.views.map(Double.init)
             notes = item.notes.isEmpty ? nil : item.notes
+            countConflict = item.countConflictNote
         }
     }
 

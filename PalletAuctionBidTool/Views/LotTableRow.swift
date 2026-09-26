@@ -1051,16 +1051,22 @@ struct LotDetailRow: View {
     /// all. Worth saying because the chip reads `18 item(s)`, which is the inventory the pallet was
     /// priced from rather than a count of prices. The frames the batches found nothing in are counted
     /// here too, because "read from 24 photographs" on its own would read as though the rest of the batch
-    /// were never looked at.
+    /// were never looked at — and so is a count two batches read differently, because that number is the
+    /// one the line above was priced from.
     private var manifestSummaryHelp: String {
         let manifest = lot.manifest
         let count = manifest?.photographCount ?? 0
         let empty = manifest?.unreadFrames.count ?? 0
+        let disputed = manifest?.items.filter { $0.countConflict != nil }.count ?? 0
         return "The pallet's inventory, read from \(count) of its photographs in batches"
             + (empty > 0 ? " (\(empty) more were read and held nothing sellable)" : "")
-            + " — each product counted once across every view the batches carried — and then priced in "
-            + "one text-only request. The manifest below is what the line items above were derived from, "
-            + "so a figure that looks wrong can be checked against the entry behind it."
+            + " — each product counted once across every view the batches carried"
+            + (disputed > 0
+                ? ", with the \(disputed) count(s) two of them read differently resolved by evidence "
+                    + "rather than by size"
+                : "")
+            + " — and then priced in one text-only request. The manifest below is what the line items above "
+            + "were derived from, so a figure that looks wrong can be checked against the entry behind it."
     }
 
 
@@ -1145,6 +1151,9 @@ struct LotDetailRow: View {
     /// line item that looks wrong can be checked against the manifest entry it came from, and the gallery
     /// numbers each entry names are the photographs that entry rests on. One line per distinct product —
     /// which is the whole claim the batching makes, that a carton seen from four angles is one line here.
+    /// A count two batches disagreed about is not hidden either: the entry prints the conflict and the
+    /// evidence the fold used to settle it (`ManifestItem.countConflictNote`), because that number, not
+    /// the larger one, is what the line behind it was priced from.
     private var manifestBlock: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Manifest read from the photographs: \(lot.manifest?.logPhrase ?? "")")
@@ -1171,13 +1180,32 @@ struct LotDetailRow: View {
                                 .foregroundStyle(.tertiary)
                                 .textSelection(.enabled)
                         }
+
+                        // The one thing about an entry that the batches did not actually agree on: two of
+                        // them read different counts, and the number the line was priced from is the one
+                        // the better sighting supported. Printed in the caution colour because it is the
+                        // count an operator can still check against the frames the entry names.
+                        if let conflict = item.countConflictNote {
+                            Text(conflict)
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                                .textSelection(.enabled)
+                                .help("Two batches read different counts for this product. The inventory "
+                                    + "keeps the number the better sighting supported — the higher "
+                                    + "confidence first, then the sighting that read a barcode, then the one "
+                                    + "seen in more photographs — and this line was priced from that number, "
+                                    + "so check the frames above if it looks wrong. The pricing pass is told "
+                                    + "not to re-count it.")
+                        }
                     }
                 }
             }
         }
         .help("What the photographs were read to hold before any of it was priced — one entry per "
             + "distinct product, counted once across every view the batches carried, with the frames each "
-            + "was seen in. Pricing looks these entries up; it does not re-count them.")
+            + "was seen in. Pricing looks these entries up; it does not re-count them. An entry that says "
+            + "its count was disputed is one two batches read differently: the number shown is the one the "
+            + "better sighting supported.")
     }
 }
 

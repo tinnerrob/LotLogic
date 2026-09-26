@@ -2955,7 +2955,17 @@ do {
     check(outcome.imagesSent == 3, "every photograph of the gallery travelled", detail: "\(outcome.imagesSent)")
     let manifest = outcome.manifest ?? PalletManifest()
     check(manifest.count == 2, "the batches folded into two distinct items, not three", detail: "\(manifest.count)")
-    check(manifest.items.first?.quantity == 6, "a product seen in both batches keeps the larger count, not the sum", detail: "\(manifest.items.first?.quantity ?? -1)")
+    // The batches read the candles differently — six, with the barcode decoded off the pack, and four from
+    // the side without it — so the count is resolved rather than maximised (deviation 38).
+    check(manifest.items.first?.quantity == 6,
+          "a product seen in both batches is counted once, from the sighting that read its barcode",
+          detail: "\(manifest.items.first?.quantity ?? -1)")
+    check(manifest.items.first?.countConflict?.reason == .code
+            && manifest.items.first?.countConflict?.counts == [4, 6],
+          "and the disagreement is recorded with the evidence that settled it",
+          detail: manifest.items.first?.countConflict.map { "\($0.counts) \($0.reason.rawValue)" } ?? "none")
+    check(manifest.items.first?.countConflictNote == "counts 4 and 6 disagreed; kept 6 — the sighting that read the barcode",
+          "as the note an operator reads on the entry", detail: manifest.items.first?.countConflictNote ?? "none")
     check(manifest.items.first?.views == [1, 2, 3], "and names every photograph it was seen in", detail: "\(manifest.items.first?.views ?? [])")
     check(manifest.items.first?.brand == "Yankee Candle", "the batch that named the brand properly keeps the field")
     check(manifest.items.first?.modelNumber == "1631666", "and the model number survives from the batch that read it")
@@ -2993,6 +3003,12 @@ do {
     check(pricing.contains("8 unit(s)"), "and its unit count", detail: String(pricing.prefix(120)))
     check(pricing.lowercased().contains("json"), "and the word json, which JSON mode requires")
     check(pricing.contains("\"itemName\""), "plus the line-item schema it must answer in")
+    check(pricing.contains("counts 4 and 6 disagreed; kept 6"),
+          "the count conflict rides on the manifest slab, so the model prices the number the fold resolved",
+          detail: String(pricing.suffix(320)))
+    check(systemText(in: pricingChat).contains("`countConflict`")
+            && systemText(in: pricingChat).contains("do not re-count it"),
+          "and the pricing rules say what a line carrying one means")
 
     for (index, chat) in chats.enumerated() {
         let format = chat.json["response_format"] as? [String: Any]
@@ -3021,7 +3037,17 @@ do {
     ])
 
     check(manifest.count == 2, "two products, however many batches saw them", detail: "\(manifest.count)")
-    check(manifest.items[0].quantity == 9, "the larger count wins — a second angle is not more goods", detail: "\(manifest.items[0].quantity)")
+    check(manifest.items[0].quantity == 6,
+          "the count comes from the sighting with the higher confidence, not from the larger number",
+          detail: "\(manifest.items[0].quantity)")
+    check(manifest.items[0].countConflict?.reason == .confidence
+            && manifest.items[0].countConflict?.kept == 6,
+          "and the nine its weaker sighting read is recorded as a conflict rather than silently dropped",
+          detail: manifest.items[0].countConflict.map { "\($0.counts) \($0.reason.rawValue)" } ?? "none")
+    check(manifest.items[0].countConflictNote
+            == "counts 6 and 9 disagreed; kept 6 — the sighting with the higher confidence",
+          "which reads as a sentence on the entry and on the pricing prompt",
+          detail: manifest.items[0].countConflictNote ?? "none")
     check(manifest.items[0].views == [1, 2, 3], "views accumulate", detail: "\(manifest.items[0].views)")
     check(manifest.items[0].modelNumber == "1631666", "a field one batch read is kept when the other did not")
     check(manifest.items[0].condition == "new" && manifest.items[0].labelText == "Yankee Candle 22 oz",
@@ -3029,8 +3055,11 @@ do {
     check(manifest.items[0].confidence == "High", "confidence keeps the strongest of the two sightings", detail: manifest.items[0].confidence)
     check(manifest.items[0].confidenceLevel == .high, "which normalises to the typed vocabulary")
     check(manifest.items[0].detailPhrase.contains("photographs 1, 2, 3"), "the card's line names the frames", detail: manifest.items[0].detailPhrase)
-    check(manifest.unitCount == 11 && manifest.photographCount == 5, "the roll-ups count units and frames", detail: manifest.logPhrase)
-    check(manifest.compactPhrase == "2 item(s) · 11 unit(s)", "and the row's shorter form reads off the same numbers", detail: manifest.compactPhrase)
+    check(manifest.unitCount == 8 && manifest.photographCount == 5, "the roll-ups count units and frames", detail: manifest.logPhrase)
+    check(manifest.compactPhrase == "2 item(s) · 8 unit(s)", "and the row's shorter form reads off the same numbers", detail: manifest.compactPhrase)
+    check(manifest.logPhrase.hasSuffix("1 count(s) in dispute"),
+          "and the settled line says a count was resolved rather than reading as a plain reading",
+          detail: manifest.logPhrase)
 
     // A different model number is a different product, whatever the name says.
     var split = PalletManifest()
@@ -3633,6 +3662,167 @@ do {
 } catch {
     tally.bump()
     print("  FAIL  unexpected error: \(error)")
+}
+
+// MARK: - 49. When two batches count one pallet differently (Tier 3)
+
+do {
+    print("49. A count two batches read differently is resolved by evidence rather than by size, and said out loud")
+
+    // One product, two sightings, counts that differ. Everything else about the pairing is the fold's
+    // business (`isSameProduct(as:)`), which check 45 covers — these are about the number.
+    func counted(quantity: Int, confidence: String, code: String? = nil, views: [Int] = []) -> ManifestItem {
+        ManifestItem(
+            itemName: "Energizer MAX AA, 24-pack", brand: "Energizer", quantity: quantity,
+            identifiers: code.map { [$0] } ?? [], confidence: confidence, views: views
+        )
+    }
+    func folded(_ mine: ManifestItem, _ theirs: ManifestItem) -> ManifestItem {
+        var item = mine
+        item.merge(theirs)
+        return item
+    }
+
+    // 1. Confidence first. A batch that says Low is telling the app it could not read the goods well, and
+    //    nine from a guess is not better than six from a reading.
+    let byConfidence = folded(counted(quantity: 6, confidence: "High"), counted(quantity: 9, confidence: "Low"))
+    check(byConfidence.quantity == 6, "the higher-confidence sighting's count is the one kept",
+          detail: "\(byConfidence.quantity)")
+    check(byConfidence.countConflict?.reason == .confidence && byConfidence.countConflict?.counts == [6, 9],
+          "and the conflict names both counts and the evidence that settled it",
+          detail: byConfidence.countConflict.map { "\($0.counts) \($0.reason.rawValue)" } ?? "none")
+
+    // 2. A decoded barcode next — the same cue identity is decided by first (deviation 35), for the same
+    //    reason: that batch read the pack rather than a label beside it. The two batches claim the same
+    //    confidence, so nothing decides this but the code.
+    let reading = counted(quantity: 6, confidence: "High")
+    let coded = counted(quantity: 4, confidence: "High", code: "039800011324")
+    let byCode = folded(reading, coded)
+    check(byCode.quantity == 4, "the sighting that decoded the goods' own barcode keeps its count",
+          detail: "\(byCode.quantity)")
+    check(byCode.countConflict?.reason == .code, "recorded as a code win",
+          detail: byCode.countConflict?.reason.rawValue ?? "none")
+
+    // 3. Then the sighting that was seen more than once: three frames agreeing on a count are one reading
+    //    with two checks on it, and the fourth photograph that disagreed saw only part of the stack.
+    let byViews = folded(
+        counted(quantity: 4, confidence: "High", views: [1, 2, 3]),
+        counted(quantity: 6, confidence: "High", views: [4])
+    )
+    check(byViews.quantity == 4, "failing a code, the count seen in more photographs is kept",
+          detail: "\(byViews.quantity)")
+    check(byViews.countConflict?.reason == .views, "recorded as a views win",
+          detail: byViews.countConflict?.reason.rawValue ?? "none")
+
+    // 4. Nothing to separate them is the one case the old rule was for, and it is still the rule: the
+    //    larger count, which is also the only rung that does not depend on which batch answered first.
+    let bySize = folded(
+        counted(quantity: 4, confidence: "High", views: [1]),
+        counted(quantity: 6, confidence: "High", views: [2])
+    )
+    check(bySize.quantity == 6, "with nothing else to go on the larger count wins, as it always did",
+          detail: "\(bySize.quantity)")
+    check(bySize.countConflict?.reason == .larger, "recorded as the fallback it is",
+          detail: bySize.countConflict?.reason.rawValue ?? "none")
+
+    // The fold's promise, kept by the new rule too: batches are in flight three at a time, so which one
+    // answered first is not a fact about the pallet.
+    let oneWay = folded(reading, coded)
+    let otherWay = folded(coded, reading)
+    check(oneWay.quantity == otherWay.quantity && oneWay.countConflictNote == otherWay.countConflictNote,
+          "the count and the note land the same way whichever batch answered first",
+          detail: "\(oneWay.quantity) / \(otherWay.quantity)")
+
+    // A batch that never counted is not a batch that counted zero.
+    let quiet = folded(counted(quantity: 6, confidence: "High"), counted(quantity: 0, confidence: "High"))
+    let quietFirst = folded(counted(quantity: 0, confidence: "Low"), counted(quantity: 6, confidence: "High"))
+    check(quiet.quantity == 6 && quietFirst.quantity == 6 && quietFirst.countConflict == nil,
+          "a sighting that read no count at all does not shrink the number the other one read, or dispute it",
+          detail: "\(quiet.quantity) / \(quietFirst.quantity)")
+
+    // Agreement is not a conflict, however differently the two batches worded their confidence.
+    let agreed = folded(counted(quantity: 6, confidence: "High"), counted(quantity: 6, confidence: "Low"))
+    check(agreed.quantity == 6 && agreed.countConflict == nil && agreed.countConflictNote == nil,
+          "two batches that read the same count record nothing at all")
+
+    // Three batches that disagree about one product. The fold compares the *sightings*, not the line it
+    // has built so far — `views` and `identifiers` accumulate, so a line folded twice has more of both
+    // than either batch behind its count, and a third batch measured against that would make the answer
+    // depend on how many batches arrived first. The order below is the case that separates the two: read
+    // three frames saying four, one saying nine and two saying seven, and the three-frame sighting wins
+    // whichever batch landed first.
+    func countedMany(_ readings: [(quantity: Int, views: [Int])]) -> PalletManifest {
+        var manifest = PalletManifest()
+        for reading in readings {
+            manifest.absorb([
+                counted(quantity: reading.quantity, confidence: "High", views: reading.views)
+            ])
+        }
+        return manifest
+    }
+    let readings = [(quantity: 4, views: [1, 2, 3]), (quantity: 9, views: [4]), (quantity: 7, views: [5, 6])]
+    let orders = [[0, 1, 2], [2, 1, 0], [1, 2, 0], [0, 2, 1], [1, 0, 2], [2, 0, 1]]
+    let foldedInEveryOrder = orders.map { order in countedMany(order.map { readings[$0] }).items[0] }
+    check(foldedInEveryOrder.allSatisfy { $0.quantity == 4 },
+          "the sighting seen in most photographs keeps the count whichever order the batches landed in",
+          detail: "\(foldedInEveryOrder.map(\.quantity))")
+    check(Set(foldedInEveryOrder.compactMap(\.countConflictNote)).count == 1,
+          "and the note reads the same way round too",
+          detail: foldedInEveryOrder.first?.countConflictNote ?? "none")
+    check(foldedInEveryOrder.allSatisfy { $0.countConflict?.counts == [4, 7, 9] },
+          "with every count the fold had to weigh on it, whatever order they arrived in",
+          detail: "\(foldedInEveryOrder.map { $0.countConflict?.counts ?? [] })")
+    check(foldedInEveryOrder.allSatisfy { $0.countConflict.map { $0.counts.contains($0.kept) } == true },
+          "and the count it kept is one of the counts it names, so the note always reads as a story")
+}
+
+// MARK: - 49b. The conflict, once it is on the inventory
+
+do {
+    func counted(quantity: Int, confidence: String, code: String? = nil) -> ManifestItem {
+        ManifestItem(
+            itemName: "Energizer MAX AA, 24-pack", brand: "Energizer", quantity: quantity,
+            identifiers: code.map { [$0] } ?? [], confidence: confidence
+        )
+    }
+
+    // A third batch that agrees with neither adds its count rather than replacing what the first two said,
+    // and the note names the number the pallet is now being paid for and why that one won.
+    var accumulated = PalletManifest()
+    accumulated.absorb([counted(quantity: 6, confidence: "High")])
+    accumulated.absorb([counted(quantity: 4, confidence: "Low")])
+    accumulated.absorb([counted(quantity: 9, confidence: "High", code: "039800011324")])
+
+    check(accumulated.items[0].quantity == 9 && accumulated.items[0].countConflict?.counts == [4, 6, 9],
+          "a third batch agreeing with neither is added to the conflict, not swapped in for the first two",
+          detail: "\(accumulated.items[0].countConflict?.counts ?? [])")
+    check(accumulated.items[0].countConflictNote
+            == "counts 4, 6 and 9 disagreed; kept 9 — the sighting that read the barcode",
+          "and the note names every count and the evidence that won the one kept",
+          detail: accumulated.items[0].countConflictNote ?? "none")
+    check(accumulated.logPhrase.hasSuffix("1 count(s) in dispute"),
+          "the settled inventory says a count was resolved, so the console does not read as a plain reading",
+          detail: accumulated.logPhrase)
+
+    // Where it has to survive: the request that multiplies the count out, and the row the operator reads.
+    let slab = LotManifestPrompt.render(accumulated).text
+    check(slab.contains("\"countConflict\":\"counts 4, 6 and 9 disagreed; kept 9"),
+          "the pricing prompt's slab carries the conflict on the line it belongs to", detail: slab)
+    check(LotManifestPrompt.pricingSystemInstruction.contains("`countConflict`")
+            && LotManifestPrompt.pricingSystemInstruction.contains("do not re-count it"),
+          "and the pricing rules say to price the count it was given rather than re-counting")
+    check(accumulated.items[0].countConflictNote != nil,
+          "which is the same sentence the expanded row prints under the entry it was priced from")
+
+    // The batch contract is unchanged by this: no schema asks a batch for a conflict, so one can never be
+    // read off an answer — it is the fold's conclusion about two answers.
+    let schema = (try? JSONSerialization.jsonObject(
+        with: Data(LotManifestPrompt.manifestSchema.jsonSchemaText.utf8)
+    )) as? [String: Any] ?? [:]
+    let lineProperties = ((schema["properties"] as? [String: Any])?["manifest"] as? [String: Any])
+        .flatMap { ($0["items"] as? [String: Any])?["properties"] as? [String: Any] } ?? [:]
+    check(lineProperties["countConflict"] == nil, "no batch is ever asked for a count conflict",
+          detail: "\(lineProperties.keys.sorted())")
 }
 
 print(tally.value == 0 ? "\nALL CHECKS PASSED" : "\n\(tally.value) CHECK(S) FAILED")

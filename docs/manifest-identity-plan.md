@@ -2,7 +2,8 @@
 
 **Status:** Tier 1 (A–D) is implemented and green — `xcodebuild … CODE_SIGNING_ALLOWED=NO` builds and
 `Tools/free-tier-harness/run.sh` passes with checks 44–46 added. **Tier 2 (E–G) is implemented too —
-harness check 48** — see *Tier 2* below for what it came to. **Tiers 3–4 below are still to do.**
+harness check 48** — see *Tier 2* below for what it came to. **Tier 3 (H) is implemented as well —
+harness check 49** — see *Tier 3* below. **Tier 4 (I, credentials, J) is still to do.**
 Each tier lands behind a green build and a green harness run before the next begins.
 
 **What Tier 1 actually came to, against the plan below.** A: the route groups the gallery before it
@@ -120,12 +121,35 @@ point.
 
 ## Tier 3 — count accuracy
 
-- **H. Prefer the better count; record the conflict.** In `merge`, when two batches disagree on
-  `quantity`, keep the count from the batch with the higher `confidence`, else the one carrying a
-  decoded barcode, else the one with more `views` — instead of an unconditional `max()`. Record a
-  `countConflict` note that survives into the pricing prompt and the row. (A real numeric
-  `countConfidence` field is a deliberate follow-up, not part of the first pass.)
-- **Acceptance:** the quantity-resolution rule is harness-checked, and a conflict note is produced.
+- **H. Prefer the better count; record the conflict.** — **done.** `merge(_:)` no longer maximises:
+  `ManifestItem.mergeCount(with:)` ranks the two sightings on what the app can check — the claimed
+  `confidence`, then a decoded product code (`productCodes`, the cue `isSameProduct(as:)` trusts first),
+  then how many `views` the sighting was seen in, and only failing all three the larger count, which is
+  the old rule and the one rung a tie can fall to without depending on which batch answered first. A
+  sighting with no count at all (`quantity == 0`, what an omitted field decodes to) is not a second
+  opinion and never shrinks the other's number. The comparison is between the two *sightings*, not between
+  the folded line and the arriving batch: what the batch behind the count claimed is kept on the item as
+  `ManifestItem.CountOwner`, because `views` and `identifiers` accumulate across every batch folded, and a
+  third disagreeing batch measured against those would make the answer depend on how many batches arrived
+  first. What they disagreed about is kept typed on the item —
+  `ManifestItem.CountConflict` (`counts`, `kept`, `reason`) — and rendered as one sentence,
+  `counts 4 and 6 disagreed; kept 6 — the sighting that read the barcode`, which travels two ways: as
+  `ManifestPayload.Item.countConflict` on the manifest slab the pricing prompt carries (with pricing rule
+  3 telling the model to price that count and not re-count it), and under the entry in the expanded row,
+  in the caution colour. The counts are sorted and deduplicated, so the note reads the same whichever
+  batch landed first; a third disagreeing batch adds its count rather than replacing the first two. The
+  settled console line gained a clause for it (`… — 1 count(s) in dispute`), because a count the fold had
+  to *resolve* is not the same kind of number as one the batches agreed on. No batch is ever asked for
+  `countConflict` — it is the fold's conclusion about two answers, not something an answer can carry. A
+  real numeric `countConfidence` stays a deliberate follow-up.
+- **Acceptance (harness):** check 49 asserts the rule one rung at a time (confidence, code, views, larger
+  as the fallback), the order-independence of the count and the note across every ordering of three
+  disagreeing batches (the case that separates comparing sightings from comparing the folded line), that a
+  silent sighting neither shrinks nor disputes a count, that agreement records nothing, that a third batch
+  accumulates into `counts` (with `kept` always one of them), and that the note reaches the pricing
+  prompt's slab (with rule 3 named) and the row; check 38 drives the live route to a real disagreement and
+  asserts the note on the pricing request; check 39 covers the fold's own roll-ups under the new rule;
+  check 48 still pins that the batch schema asks no batch for a conflict.
 
 ## Tier 4 — stronger identity model, provider split, and surfacing
 
@@ -177,9 +201,9 @@ armed-provider pair.
 1. Tier 1 (A → B → C → D) — the biggest accuracy wins, all on-device or in the fold. **Done.**
 2. Tier 2 (E → F → G) — prompt and contract, verified by the harness. **Done** (check 48; README
    deviation 37).
-3. Tier 3 (H) — count resolution. **Next.**
+3. Tier 3 (H) — count resolution. **Done** (check 49; README deviation 38).
 4. Tier 4 (I, credentials, J) — the largest surface, last, because it needs two keys and a new picker.
-   (The Account sheet's two key sections and the About sheet's key instructions landed early, as
+   **Next.** (The Account sheet's two key sections and the About sheet's key instructions landed early, as
    deviation 36 — see *Credentials and the Account sheet*.)
 
 Each step: build (`xcodebuild … CODE_SIGNING_ALLOWED=NO`), run `Tools/free-tier-harness/run.sh`, add

@@ -79,6 +79,28 @@ struct ManifestItem: Codable, Hashable, Sendable, Identifiable {
     /// Anything the batch wanted to flag about this item.
     var notes: String = ""
 
+    /// What two batches disagreed about, when they read different counts for this product (`merge(_:)`).
+    ///
+    /// The app's own finding rather than a batch's, which is why no batch is ever asked for it
+    /// (`LotManifestPrompt.manifestItemProperties`) and no answer can fill it (`item(from:)`). It is kept
+    /// beside the count rather than written into `notes` because `notes` is what a *batch* said and this
+    /// is what the *fold* concluded — the two are different kinds of claim and the row draws them
+    /// differently — and because the numbers and the reason are what a later pass would use if the count
+    /// ever grows a confidence of its own (`countConflictNote`).
+    var countConflict: CountConflict?
+
+    /// The sighting the count on this item currently rests on, and what that one batch claimed
+    /// (`mergeCount(with:)`).
+    ///
+    /// Needed because two sightings that *agree* on a count still differ in how well each supports it, and
+    /// because `views`, `identifiers` and `confidence` all accumulate across every batch folded into this
+    /// item — none of them can answer "what did the sighting that produced this count see" once two batches
+    /// have been merged, and a third batch arriving with a different count has to be measured against the
+    /// *sighting* rather than against everything folded since, or the answer would depend on the order the
+    /// batches landed in. `nil` means nothing has been folded into this item yet, so its own fields are
+    /// still the original sighting's.
+    var countOwner: CountOwner?
+
     init(
         id: UUID = UUID(),
         itemName: String,
@@ -112,7 +134,7 @@ struct ManifestItem: Codable, Hashable, Sendable, Identifiable {
     /// Every key but `id`.
     private enum CodingKeys: String, CodingKey {
         case itemName, brand, modelNumber, category, quantity, condition, packaging
-        case identifiers, labelText, confidence, views, notes
+        case identifiers, labelText, confidence, views, notes, countConflict, countOwner
     }
 }
 
@@ -146,6 +168,12 @@ extension ManifestItem {
         parts.append(contentsOf: identifiers)
         return parts.joined(separator: "  ·  ")
     }
+
+    /// `counts 6 and 4 disagreed; kept 6 — the sighting that read the barcode` — the disagreement the
+    /// fold found on this item, as the sentence the expanded row prints under the entry and the pricing
+    /// prompt carries on the line (`ManifestPayload.Item.countConflict`). `nil` when the batches agreed,
+    /// which is the ordinary case.
+    var countConflictNote: String? { countConflict?.note }
 
     /// What makes two sightings one product.
     ///
@@ -190,7 +218,12 @@ extension ManifestItem {
     /// **order-independent**, because the batches answer a few at a time and whichever landed first is
     /// not a fact about the pallet:
     ///
-    /// * **Quantity is the larger count, never the sum.** Six cartons visible in two batches is six.
+    /// * **Quantity is never the sum** — six cartons seen by two batches are six, not twelve, because the
+    ///   two sightings are views of one pallet — and when they *disagree* on how many, the count is taken
+    ///   from the sighting that can be trusted further rather than from the larger number
+    ///   (`mergeCount(with:)`), with the disagreement and the evidence that settled it kept on the item
+    ///   (`countConflict`). A sighting that read no count at all is not a second opinion: it says nothing
+    ///   about how many the pallet holds, so it never shrinks the number the other one read.
     /// * **Every other field keeps the more informative reading** — the longer string, which is the batch
     ///   that read more of the label — so a model number one batch found survives the other's blank, and
     ///   a partial brand cannot overwrite a complete one. Equal-length readings keep the one already
@@ -200,7 +233,7 @@ extension ManifestItem {
     /// * **Confidence keeps the strongest** of the two: one legible label identifies the goods for the
     ///   pallet as a whole.
     mutating func merge(_ other: ManifestItem) {
-        quantity = max(quantity, other.quantity)
+        mergeCount(with: other)
         itemName = Self.moreInformative(itemName, other.itemName)
         brand = Self.moreInformative(brand, other.brand)
         modelNumber = Self.moreInformative(modelNumber, other.modelNumber)
@@ -221,6 +254,188 @@ extension ManifestItem {
             views.append(position)
         }
         views.sort()
+    }
+
+    /// Resolves the count when two sightings of one product disagree, and records what they disagreed
+    /// about (`countConflict`).
+    ///
+    /// The rule this replaced was the larger of the two counts, and it is wrong often enough to matter: a
+    /// batch that saw the pallet from the far side, or through shrink wrap, can read a stack twice or miss
+    /// half of it, and `max` believes whichever number is larger rather than whichever sighting earned it.
+    /// So the two sightings are ranked on what the app can actually check, strongest evidence first
+    /// (`CountOwner.winner(_:_:)`):
+    ///
+    /// 1. **The confidence the batch claimed** for this item — its own account of how legible the goods
+    ///    were, which is the one thing a batch says about *how well it read* rather than what it read.
+    /// 2. **A product code read off the goods** (`productCodes`). The sighting that reached a barcode read
+    ///    the pack itself rather than a label beside it, and its count is the one an operator can check
+    ///    against the quantity the pack's own packaging states. (This is the cue `isSameProduct(as:)` puts
+    ///    first for the same reason.)
+    /// 3. **How many photographs the item was seen in.** Three frames that agree on a count are one
+    ///    reading of the goods with two more looks at them (`views`); a single frame that disagreed with
+    ///    them is the sighting more likely to have counted a partial stack.
+    /// 4. **The larger count**, which is what the fold did before any of this and the only rung a tie can
+    ///    fall to: it depends on the numbers alone, so the fold still lands the same way whichever batch
+    ///    answered first, and an inventory does not shrink because one batch saw less of the pallet.
+    ///
+    /// A sighting that read *no* count is not a disagreeing one. A `quantity` of zero is what a batch that
+    /// left the field out decodes to (`LotManifestAnswer.item(from:)`), so treating it as a count would let
+    /// a batch that never counted shrink a number another batch read off the goods — the silent sighting
+    /// keeps whatever the counting one said, and no conflict is recorded.
+    ///
+    /// The comparison is between the two *sightings* (`CountOwner`), not between this line's accumulated
+    /// evidence and the arriving batch: a line that has been folded twice has more `views` and more
+    /// `identifiers` than either of the sightings behind it, and comparing with those would make the
+    /// answer depend on how many batches happened to arrive first. The winner of each fold becomes the
+    /// owner, so the number always rests on the best-supported sighting seen so far — a maximum over a
+    /// fixed ladder, which lands the same way whichever order the batches landed in.
+    private mutating func mergeCount(with other: ManifestItem) {
+        let mine = countOwner ?? CountOwner(
+            quantity: quantity,
+            confidence: confidenceLevel,
+            hasCode: !productCodes.isEmpty,
+            views: views.count
+        )
+        let theirs = CountOwner(
+            quantity: other.quantity,
+            confidence: other.confidenceLevel,
+            hasCode: !other.productCodes.isEmpty,
+            views: other.views.count
+        )
+
+        guard mine.quantity > 0, theirs.quantity > 0 else {
+            let counting = theirs.quantity > mine.quantity ? theirs : mine
+            quantity = counting.quantity
+            countOwner = counting
+            return
+        }
+
+        let (winner, reason) = CountOwner.winner(mine, theirs)
+
+        // Only a *disagreement* is worth reporting: two sightings that read the same number have settled
+        // that number between them, however differently they worded their confidence.
+        if mine.quantity != theirs.quantity {
+            // Every count the fold had to weigh, once each and in one order — never in the order the
+            // batches landed, because two runs over one gallery must produce the same note — so a third
+            // batch that disagrees with both adds its count rather than replacing what the first two said.
+            countConflict = CountConflict(
+                counts: Set((countConflict?.counts ?? []) + [mine.quantity, theirs.quantity]).sorted(),
+                kept: winner.quantity,
+                reason: reason
+            )
+        }
+        quantity = winner.quantity
+        countOwner = winner
+    }
+
+    /// Two batches read different counts for one product, and what the fold did about it (`mergeCount(with:)`).
+    ///
+    /// The note is the whole of what the operator and the pricing pass see (`note`); the counts and the
+    /// reason are kept typed because a note is prose, and because a later pass may want the numbers — a
+    /// numeric count confidence was deliberately left out of this first one.
+    struct CountConflict: Codable, Hashable, Sendable {
+
+        /// Every count the fold had to weigh for this product — the numbers the sightings that disagreed
+        /// read — distinct and ascending, including the one kept.
+        ///
+        /// Ascending rather than in arrival order for the reason the fold gives batch order no weight at
+        /// all: a list that read `4 and 9` for one operator and `9 and 4` for the next would look like two
+        /// different findings about one pallet.
+        var counts: [Int]
+
+        /// The count the inventory holds — always one of `counts`.
+        var kept: Int
+
+        /// The evidence that won `kept` the count (`mergeCount(with:)`).
+        var reason: Reason
+
+        /// Why one sighting's count was believed over another's, strongest evidence first.
+        enum Reason: String, Codable, Hashable, Sendable, CaseIterable {
+
+            /// The batch claimed the higher identification confidence for this item.
+            case confidence
+            /// The winning sighting carried a product code read off the goods.
+            case code
+            /// The winning sighting was seen in more of its batch's photographs.
+            case views
+            /// Nothing separated the two sightings but the numbers, so the larger count was kept.
+            case larger
+
+            /// The clause `note` prints after the count it kept.
+            var note: String {
+                switch self {
+                case .confidence: "the sighting with the higher confidence"
+                case .code: "the sighting that read the barcode"
+                case .views: "the sighting seen in more photographs"
+                case .larger: "the larger of the two"
+                }
+            }
+        }
+
+        /// `counts 6 and 4 disagreed; kept 6 — the sighting that read the barcode`.
+        ///
+        /// One sentence, because it travels twice: on the manifest line of the request that prices the
+        /// pallet, and under the entry in the expanded row. It names the counts that disagreed, the number
+        /// the pallet is now being paid for, and the evidence that chose it — everything an operator needs
+        /// to decide whether to trust the count.
+        var note: String {
+            "counts \(countsPhrase) disagreed; kept \(kept) — \(reason.note)"
+        }
+
+        /// `6 and 4`, `4, 6 and 9` — the counts as a list of numbers.
+        ///
+        /// Never a range, unlike `LotManifestPrompt.runPhrase(_:)`: these are counts rather than gallery
+        /// numbers, and `5-6` here would read as a span of units instead of two sightings.
+        var countsPhrase: String {
+            let parts = counts.map(String.init)
+            guard let last = parts.last, parts.count > 1 else { return parts.last ?? "" }
+            return parts.dropLast().joined(separator: ", ") + " and " + last
+        }
+    }
+
+    /// What one batch's sighting of a product claimed about its count (`mergeCount(with:)`).
+    ///
+    /// The sighting's **own** values, not the line's: `views`, `identifiers` and `confidence` all
+    /// accumulate across every batch folded into the item, so the line cannot say what the batch behind
+    /// its count saw — and it is the batch behind the count that a later disagreeing batch has to be
+    /// measured against, not the line.
+    struct CountOwner: Codable, Hashable, Sendable {
+
+        /// Units this sighting read.
+        var quantity: Int
+        /// The identification confidence it claimed for the item.
+        var confidence: DiscoveredItem.Confidence
+        /// Whether it carried a product code read off the goods.
+        var hasCode: Bool
+        /// How many photographs it was seen in.
+        var views: Int
+
+        /// Which of two sightings the count should come from, and why.
+        ///
+        /// The ladder `mergeCount(with:)` documents, strongest evidence first: the claimed confidence
+        /// (that batch's own account of how legible the goods were), then a product code read off the
+        /// goods, then the photographs the sighting was seen in — and only when all three agree, the larger
+        /// count, which is the rule the fold used before any of this existed.
+        ///
+        /// Nothing here consults the order the sightings arrived in: each rung is a comparison of one
+        /// value either way, and the quantity rung — the only one left when the rest tie — is itself
+        /// order-free. Folded over the same sightings in any order, this therefore lands on the same
+        /// maximum, which is what lets the fold promise a count that does not depend on the network.
+        static func winner(
+            _ mine: CountOwner,
+            _ theirs: CountOwner
+        ) -> (owner: CountOwner, reason: CountConflict.Reason) {
+            if mine.confidence.sortRank != theirs.confidence.sortRank {
+                return (mine.confidence.sortRank < theirs.confidence.sortRank ? mine : theirs, .confidence)
+            }
+            if mine.hasCode != theirs.hasCode {
+                return (mine.hasCode ? mine : theirs, .code)
+            }
+            if mine.views != theirs.views {
+                return (mine.views > theirs.views ? mine : theirs, .views)
+            }
+            return (mine.quantity >= theirs.quantity ? mine : theirs, .larger)
+        }
     }
 
     /// Every reading on this item that is *shaped* like the goods' own catalogue number.
@@ -523,7 +738,9 @@ struct PalletManifest: Codable, Hashable, Sendable {
     ///
     /// A batch that declared frames goods-free adds its own clause, because those frames are the
     /// inventory's answer for them — without it the line reads as though the pallet's other photographs
-    /// were never looked at.
+    /// were never looked at. A count two batches disagreed about adds one too, for the same reason: the
+    /// line is what an operator reads when the scan settles, and a count the fold had to *resolve* is not
+    /// the same kind of number as one the batches agreed on.
     var logPhrase: String {
         var parts = [
             "\(count) distinct item(s)",
@@ -532,6 +749,10 @@ struct PalletManifest: Codable, Hashable, Sendable {
         ]
         if !unreadFrames.isEmpty {
             parts.append("\(unreadFrames.count) of the rest declared empty")
+        }
+        let disputed = items.filter { $0.countConflict != nil }.count
+        if disputed > 0 {
+            parts.append("\(disputed) count(s) in dispute")
         }
         return parts.joined(separator: " — ")
     }

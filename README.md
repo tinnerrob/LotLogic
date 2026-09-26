@@ -180,7 +180,8 @@ PalletAuctionBidTool/
 │   │                                is built from, plus its roll-up (`PhotoReadingSummary`)
 │   ├── PalletManifest.swift         What a pallet's photographs were read to hold — the unit the batched
 │   │                                route is built from, with the cross-batch fold that counts a
-│   │                                product once and keeps the frames the batches found empty (UI-free)
+│   │                                product once, resolves a count two batches read differently, and
+│   │                                keeps the frames the batches found empty (UI-free)
 │   ├── Formatting.swift             Currency / percent / geometry formatting helpers
 │   ├── ScrapeProfile.swift          Declarative selector strategy (data, not code)
 │   ├── ScrapeProfilePresets.swift   `ScrapeProfile.genericBase()` — the default strategy
@@ -488,8 +489,12 @@ which route produced a figure.
    strongest evidence there is (`ManifestItem.isSameProduct(as:)`, deviation 35): a barcode both batches
    read off the goods — the app's own reading of every frame is folded into each batch's answer, so a
    barcode visible in one batch's photographs still joins them — then the model numbers, then the names
-   compared as product-shaped words. The larger count wins (never
-   the sum — two angles are not more goods), the more complete reading of each field survives, the views
+   compared as product-shaped words. The count those sightings support is never summed (two angles are not
+   more goods), and when two of them *disagree* on it the fold resolves the number instead of trusting the
+   larger one (`ManifestItem.mergeCount(with:)`, deviation 38): the higher confidence first, then the
+   sighting that read a barcode, then the one seen in more photographs, and the entry, the console line and
+   the pricing prompt all say the count was disputed and which sighting won it. The more complete reading of
+   each field survives, the views
    and identifiers accumulate, and the strongest confidence is kept. A product two batches read
    different *model numbers* for is two products, and so is one whose printed size or pack count
    disagrees. The frames the batches declared goods-free are folded in too, and the console says what
@@ -1574,11 +1579,18 @@ driving a consumer web page" is not, deliberately.
     returns.
     **(b) The fold is a model, not prompt wording.** `PalletManifest`/`ManifestItem` own both halves of
     it: *whether* two sightings are one product (`isSameProduct(as:)` — deviation 35) and what the one
-    line they become keeps. A product the batches agree on is one line, the **larger** count wins (never
-    the sum — two angles are not more goods), each field keeps the more informative reading, views and
-    identifiers accumulate, and the strongest confidence survives. The rules are order-independent on
-    purpose: batches are in flight three at a time, so whichever answered first is not a fact about the
-    pallet, and a fold whose answer depended on the network would be a bug nobody could reproduce.
+    line they become keeps. A product the batches agree on is one line, the count is never summed (two
+    angles are not more goods), each field keeps the more informative reading, views and identifiers
+    accumulate, and the strongest confidence survives. When the two sightings *disagree* on the count the
+    number is **resolved** rather than maximised (`mergeCount(with:)` — deviation 38): the higher
+    confidence first, then a decoded barcode, then the sighting seen in more photographs, and the larger
+    count only when nothing separates them. The rules are order-independent on purpose: batches are in
+    flight three at a time, so whichever answered first is not a fact about the pallet, and a fold whose
+    answer depended on the network would be a bug nobody could reproduce. The count-resolution rule keeps
+    that promise, which is why it compares the two *sightings* rather than the line it has built so far
+    (the line's `views` and `identifiers` grow with every batch folded), why its last rung is the larger
+    number rather than the first sighting held, and why the conflict it records (counts ascending, one
+    sentence of prose) reads the same either way round.
     **(c) The prompt is written for a batch, and says so.** `LotManifestPrompt.manifestSystemInstruction`
     spends its rules on the one mistake batching invites — counting the same carton once per view — and
     on legibility (shrink wrap, stacks, half-hidden labels, barcode digits copied as printed), and it
@@ -1594,8 +1606,9 @@ driving a consumer web page" is not, deliberately.
     a new route).
     **(e) The manifest is kept on the row as evidence.** It answers the same question a `PhotoReading`
     answers, so it is shown the same way: an expanded row lists the inventory — quantity, name, brand,
-    model number, confidence and the frames each entry was seen in — beside the line items derived from
-    it, and the console states it once when it settles. A price that looks wrong can then be traced to
+    model number, confidence and the frames each entry was seen in, with any count the batches disagreed
+    about printed under its entry in the caution colour — beside the line items derived from it, and the
+    console states it once when it settles. A price that looks wrong can then be traced to
     the entry behind it, which is the whole reason the app keeps readings at all.
 34. **The board's counts moved under the table, and the search box moved to the left of the toolbar.** A
     readout is not a control: the lot count, the count a search leaves, the count still waiting to be
@@ -1726,6 +1739,45 @@ driving a consumer web page" is not, deliberately.
     two more, and asserts the schema, the cues, the account and the temperatures as they go out on the
     wire — `temperature: 0` for the batch and 0.2 for the pass that prices it.
 
+38. **A count two batches read differently is resolved by evidence, and the app says so.** The fold had one
+    line for the count and it was `max()`: whichever number was larger won. That is the right rule only
+    when nothing separates the two sightings — and something usually does. A batch that saw the pallet from
+    the far side, or through shrink wrap, can read a stack twice or miss half of it, and the count it
+    returns is then the number that was *bigger* rather than the number that was earned, when the batch
+    that walked the front of the pallet and read the barcode off the pack is the sighting an operator could
+    have checked.
+    **(a) The rule, in the order the app can check it.** `ManifestItem.mergeCount(with:)` ranks the two
+    sightings: the **confidence** the batch claimed for the item first (its own account of how legible the
+    goods were), then a **decoded product code** — the cue identity is decided by first, for the same
+    reason: that batch read the pack itself rather than a label beside it, and its count is the one that can
+    be checked against the quantity the pack's own packaging states — then **how many photographs** the
+    sighting was seen in (three frames that agree on a count are one reading with two more looks at it), and
+    only failing all three the **larger count**, which is the old rule and the one rung a tie can fall to
+    without depending on which batch answered first. A sighting that read no count at all is not a second
+    opinion: `quantity` of zero is what a batch that left the field out decodes to, so it keeps the number
+    the other batch read and records no disagreement. What is compared is the two *sightings*
+    (`ManifestItem.CountOwner` — its count and the evidence behind it), not the line's accumulated totals:
+    a line folded twice has more `views` and more `identifiers` than either batch behind its count, so
+    measuring a third batch against that would make the answer depend on how many batches happened to
+    arrive first. The winner of each fold becomes the line's owner, which is what keeps the whole rule
+    order-free — a maximum over a fixed ladder, landed on whichever way the batches answer.
+    **(b) The disagreement is kept, and it travels.** What the two sightings said is recorded on the
+    manifest item (`ManifestItem.CountConflict` — the counts, the one kept, the reason) and rendered as one
+    sentence, `counts 4 and 6 disagreed; kept 6 — the sighting that read the barcode`, which prints under
+    the entry in the expanded row in the caution colour and rides the manifest slab into the pricing request
+    as `ManifestPayload.Item.countConflict`, with rule 3 telling the model to price the count it was given
+    rather than re-counting, averaging or adjusting it. The counts are sorted and deduplicated rather than
+    listed in the order the batches landed — two runs over one gallery have to produce the same sentence —
+    and a third batch that agrees with neither adds its count rather than replacing what the first two said.
+    The settled console line gained a clause for the reason the declared-empty frames did:
+    `… read from 24 photograph(s) — 1 count(s) in dispute` is a different kind of number from one the
+    batches agreed on, and the operator is the one who can check it against the frames the entry names. No
+    batch is ever asked for a conflict — it is the fold's conclusion about two answers rather than something
+    an answer can carry — and a real numeric count confidence stays a deliberate follow-up. Harness check 49
+    asserts the rule one rung at a time, both order-independence properties, the silent-sighting rule, the
+    accumulating note and that the note reaches the pricing slab and pricing rule 3; check 38 drives the live
+    route to a real disagreement and finds the note on the pricing request.
+
 ---
 
 Selectors live in data, not code: edit `ScrapeProfilePresets.genericBase()` or add a new
@@ -1787,6 +1839,7 @@ when a card carries three links.
 | "No active listings" | Working as intended (deviation 22): the page's own empty state — *"Results: No Items Found."* — or every scraped lot being marked sold. Nothing was spent and nothing failed. If the auction really does have lots, widen `noResultsSelectors` / `noResultsTextPattern` (a false positive) or check the auction page through the **info** glyph. |
 | The same carton appears twice in the table, as two lots of its own | The fold did not recognise the two sightings as one product (deviation 35). Read the console and the expanded row first: the manifest entries a price was derived from are listed there, and two entries that should have been one usually disagree about the printed size or pack count, or each reports a different model number — a reading problem rather than a fold problem. If both entries carry the *same* barcode digits and were still counted twice, that is a bug: a shared product code is meant to be conclusive. |
 | The console says a batch "did not account for photograph 5" | That batch's answer named no item seen in that frame and did not declare it empty (`LotManifestPrompt` rule 8), so its items were folded as usual and the inventory may be **short the product that frame showed** — open the lot, look at the frame (the numbering is the gallery's own), and press **Price** again if something is missing. Nothing is retried automatically: a request per frame costs more than the next scan, which reads that frame again anyway. See deviation 37. |
+| The console says a count is "in dispute", or an entry says its counts disagreed | Two batches read different counts for one product, which is normal on a pallet read from two sides: the inventory keeps the number the better sighting supported (higher confidence, then a barcode, then more photographs — deviation 38) and the entry prints both counts and the reason. Nothing re-counts it — the pricing pass is told to price that number — so the check is the operator's: open the lot, look at the frames the entry names under the manifest line, and compare the count with what they show. If the kept number is wrong, no setting changes it — the gallery is the lot's, and the count is the app's best reading of it: press **Price** again (a fresh batch may read those frames more clearly) and otherwise treat the figure as the number the pallet was read to hold, since the line was priced from it. See deviation 38. |
 | The board holds fewer lots than the listing shows | Read the console first: every page logs `N cards …, M new`. A *"yielded no lot"* line means the card selectors matched a tile nothing could be read from, so widen `cardSelectors` (or the tile is genuinely empty) — the count of `with a lot-page address` on the extracted line is the other clue. A *"lots already on the board"* line means two cards resolved to the *same lot page*, so check `detailLinkSelectors` and `nonLotHrefPattern`: an anchor that is not the lot's own (the catalogue, a share link) makes two lots look like one. |
 | The **Active** column says "Sold" on lots that are still open | The sold rule matched something the site did not mean. The site's own badge is the authority (a short status element, then a card attribute, then the card text), so add the site's real badge to `lotStatusSelectors` and, if its wording trips the fallback, tighten `soldTextPattern`. The harness's check 28 pins the "sold as one pallet" case, and the Node shim pins the badge cases. |
 | The **Active** column says "Active" on lots the site has sold | The marker is somewhere the profile does not look. Find the element that carries it on the auction page (the **info** glyph) and add its selector to `lotStatusSelectors` (or its attribute name to the list in `readCard`). Sold lots are only *flagged* — never dropped and never locked, so nothing is lost and nothing is off limits while you tune it. |
