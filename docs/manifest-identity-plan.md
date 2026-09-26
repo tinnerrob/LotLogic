@@ -17,8 +17,8 @@ item's identifiers. C: `labelText` on `LotImageEvidence`, filled by `labelLines(
 — the reader's *second* filter, kept narrow so the freight labels and paperwork stay out. D:
 `namesDescribeSameProduct(_:_:)` over `nameTokens(_:)`, with sizes and pack counts canonicalised and
 required to agree. Harness: 44 (the route's picture fold), 45 (the identity questions, unit and end to
-end), 46 (the wording filter and its prompt line). README: deviation 35, and deviations 33/44 rewritten
-where they described the old fold.
+end), 46 (the wording filter and its prompt line). README: deviation 35 added, and deviation 33's fold
+paragraph rewritten where it described the old name-and-number fold.
 
 ## The problem
 
@@ -47,7 +47,7 @@ point.
 
 ## Tier 1 — on-device + deterministic fold (highest leverage, cheapest)
 
-### A. Fold provably-identical frames on the batched route
+### A. Fold provably-identical frames on the batched route — **done**
 - Call `PhotoFrameGrouping.group(images:labels:limit:)` in `manifestRoute` **before**
   `LotImageLoader.batches`.
 - Build the batch list from the representative frames; drop exact duplicates and merge their
@@ -58,7 +58,7 @@ point.
 - **Acceptance:** a gallery whose frames 2 and 3 are byte-identical sends 2 manifest images, not 3;
   the fold is logged; frame 3's barcode still reaches the prompt.
 
-### B. Identifier-first identity in `ManifestItem.isSameProduct`
+### B. Identifier-first identity in `ManifestItem.isSameProduct` — **done**
 - Add an **identifier intersection** test before model-number/name matching: a shared barcode/SKU is
   conclusive "same product" even when the names differ.
 - Make it deterministic by injecting the **on-device** decodes into the fold: after a batch returns,
@@ -67,14 +67,14 @@ point.
 - **Acceptance:** two batches reporting the same UPC on frames 2 and 5 under different names fold to
   one item.
 
-### C. Surface full recognised label text on-device
+### C. Surface full recognised label text on-device — **done**
 - Add `labelText: [String]` to `LotImageEvidence`, filled from the `VNRecognizeTextRequest` lines
   that are *not* identifier-shaped (capped, truncated). Add a "Printed label text: …" line to
   `promptLines` / `singlePhotographPromptLines`, so the model is handed more than the digits.
 - **Acceptance:** the existing `LotImageDigest` harness check is extended so a stubbed reading yields
   label lines and the prompt carries them.
 
-### D. Canonicalised, token-overlap name matching
+### D. Canonicalised, token-overlap name matching — **done**
 - Replace exact normalised-name equality in `isSameProduct` with a token matcher: strip
   pack-count/size stopwords (`24-pack`, `22 oz`, `12x`, `12 ct`, …), build token sets, require brand
   compatibility **and** a token-containment/Jaccard threshold. Model-number match stays strongest;
