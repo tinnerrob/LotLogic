@@ -124,16 +124,25 @@ point.
   right schema mode, and that pricing still goes to the pricing provider.
 
 ### Credentials and the Account sheet (required *with* the split)
-- Gemini needs its **own API key** — there is no keyless path — but a **free AI Studio key with no
+
+**Partly landed ahead of the split** (README deviation 36): the Account sheet now draws **two**
+credential sections — a key and its own model picker each, both always on screen, under a segmented
+**Appraise with** choice — and each section prints the page its key comes from, which the About sheet's
+new *Getting an API key* also documents. `AppSettings.hasAPIKey(for:)` / `apiKey(for:)` /
+`modelID(for:)` / `setAPIKey(_:for:)` / `setModelID(_:for:)` / `providerKeyStates` are the per-provider
+accessors that made it possible; the readiness logic below should build on them rather than on the
+armed-provider pair.
+
+- Gemini still needs its **own API key** — there is no keyless path — but a **free AI Studio key with no
   billing account** is enough for identity. Both keys already have homes (`AppSettings.apiKey` for
-  Gemini, `AppSettings.deepSeekAPIKey` for DeepSeek); what is missing is the UI and readiness logic
-  to use them together.
-- `AppSettings`: add `hasGeminiKey` / `hasDeepSeekKey`; redefine `hasAPIKey` (and `canScanLots`) to
-  require the pricing key **and**, when the split is on, the identity key.
-- `SiteSettingsSheet`: show **two** credential fields (and a model field per provider) plus the
-  "Identity (manifest) provider" picker; the status pill and the warning name *which* key is missing;
-  the footnote explains that, when split, the Gemini key goes to Gemini for the manifest pass and the
-  DeepSeek key to DeepSeek for pricing.
+  Gemini, `AppSettings.deepSeekAPIKey` for DeepSeek).
+- `AppSettings`: redefine `hasAPIKey` (and `canScanLots`) to require the pricing key **and**, when the
+  split is on, the identity key — `hasAPIKey(for:)` already answers for a *named* provider, so this is
+  a short change once `identityProvider` exists.
+- `SiteSettingsSheet`: still to add the "Identity (manifest) provider" picker; the header pill, the
+  per-section key chips and the warning already name *which* key is which, and the footnote already
+  says that switching appraisers is lossless. Extend that footnote to explain that, when split, the
+  Gemini key goes to Gemini for the manifest pass and the DeepSeek key to DeepSeek for pricing.
 - `ControlPanelView` summary and dot, and `AnalysisCoordinator.requireScanning()`, inherit the new
   `hasAPIKey` and name the missing provider.
 
@@ -149,6 +158,8 @@ point.
 2. Tier 2 (E → F → G) — prompt and contract, verified by the harness.
 3. Tier 3 (H) — count resolution.
 4. Tier 4 (I, credentials, J) — the largest surface, last, because it needs two keys and a new picker.
+   (The Account sheet's two key sections and the About sheet's key instructions landed early, as
+   deviation 36 — see *Credentials and the Account sheet*.)
 
 Each step: build (`xcodebuild … CODE_SIGNING_ALLOWED=NO`), run `Tools/free-tier-harness/run.sh`, add
 the harness check named above, and update the README (architecture, "How one scan works", cost

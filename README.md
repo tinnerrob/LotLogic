@@ -128,12 +128,16 @@ covers the lot for a moment on the way in and dissolves into it (see deviation 3
 2. Paste the **lot-list URL** (the page that already lists lots, e.g. `…/auctions?page=1`).
 3. Optionally open **Account** (titlebar, or `⌘,`) and fill in **Site email / Site password** —
    leave both blank to scrape anonymously or to reuse the session already stored by the app.
-4. In the same sheet, pick a **Provider** and paste its API key.
-   **Gemini** (Google AI Studio) has a **free tier** that needs no billing account and costs
-   nothing — see *Cost* below. **DeepSeek Flash** is the paid alternative: cheaper per token, but it
-   draws on a prepaid balance. Each provider keeps its own key and model, so switching back and
-   forth is free. The **Account** button in the titlebar wears an orange dot while the selected
-   provider has no key, because nothing can be appraised without one.
+4. In the same sheet, paste a key into the section for the provider you mean to use — **Gemini** and
+   **DeepSeek** have a section each, both always on screen, each with its own model picker, so both
+   keys can be set and switching back and forth is free. **Gemini** (Google AI Studio) has a **free
+   tier** that needs no billing account and costs nothing: its key page is
+   `aistudio.google.com/apikey`, and *Cost* below has the rate limits. **DeepSeek Flash** is the paid
+   alternative — cheaper per token, but it draws on a prepaid balance, from
+   `platform.deepseek.com/api_keys`. **Appraise with** decides which of the two prices lots. The
+   **Account** button in the titlebar wears an orange dot while the armed provider has no key, because
+   nothing can be appraised without one. The app's own **About** sheet prints the same two pages with
+   the steps to get each key, under *Getting an API key*.
 5. Open **Tuning** if the defaults need changing — how many pages a run walks, how fast it may call
    out, how many of a lot's photographs a scan reads one at a time, and the bid percentages behind
    the **Max bid** column.
@@ -222,7 +226,8 @@ PalletAuctionBidTool/
     │                                moment, then gone (see deviation 31)
     ├── ControlPanelView.swift       The titlebar (app mark and name, Account / Tuning / About) plus the
     │                                URL field, the run buttons and the auction page's info glyph
-    ├── SiteSettingsSheet.swift      The modal behind Account: site login, provider, model, API key
+    ├── SiteSettingsSheet.swift      The modal behind Account: site login, **Appraise with**, and one
+    │                                section per provider — its key, its model, where the key comes from
     ├── RunTuningSheet.swift         The modal behind Tuning: run limits, then the bidding judgement
     ├── AboutSheet.swift             The modal behind About: the app's name and tagline over what it
     │                                does, and how to work it
@@ -637,8 +642,8 @@ A hidden web view cannot be clicked, so the app hands the real page back to you:
 | --- | --- | --- |
 | Auction URL, tunings, provider, model IDs | `UserDefaults` | Written when a run or a scan starts. |
 | Site email / password | `UserDefaults` | **Plaintext caveat — see below.** Edited in the Account sheet (⌘,). |
-| Gemini API key | `UserDefaults` | Sent as the `x-goog-api-key` header, never in a URL or a log line. |
-| DeepSeek API key | `UserDefaults` | Sent as `Authorization: Bearer …`, never in a URL or a log line. |
+| Gemini API key | `UserDefaults` | Sent as the `x-goog-api-key` header, never in a URL or a log line. Created at `aistudio.google.com/apikey` (free, no billing account). Edited in the Account sheet's **Gemini** section. |
+| DeepSeek API key | `UserDefaults` | Sent as `Authorization: Bearer …`, never in a URL or a log line. Created at `platform.deepseek.com/api_keys` (prepaid balance). Edited in the Account sheet's **DeepSeek** section. |
 | Site login cookie | `WKWebsiteDataStore.default()` | App container; persists between launches. |
 | Scraped lots / valuations | memory only | Nothing is written to disk; quitting discards results. |
 | Per-photograph readings | `~/Library/Application Support/<bundle id>/PhotoReadings/` | One JSON file per lot, keyed by model + prompt version, so a re-scan reuses what it already paid for. Cleared from the Account sheet's **Forget** button. `<bundle id>` is `com.mFT.PalletAuctionBidTool` — the bundle's own address, which is what the app is *built* as, not the name it prints (see deviation 30). |
@@ -649,6 +654,19 @@ store. That is acceptable for a single-operator local tool, but it is *not* appr
 shared or distributed build: move the values into the Keychain before shipping this to anyone
 else. The scaffolding is already narrow — `AppSettings.persist()` is the only write path, and each
 key is read in exactly one place (`GeminiValuationService.init` / `DeepSeekValuationService.init`).
+
+**Where the keys come from.** Neither service has a keyless path, and the app used to ask for a key
+without ever saying which page issues one. Both are created on the provider's own site, and both are
+pasted into the Account sheet's section for that provider:
+
+| Provider | Key page | Cost |
+| --- | --- | --- |
+| Gemini | `aistudio.google.com/apikey` | Free — an AI Studio key needs no billing account |
+| DeepSeek | `platform.deepseek.com/api_keys` | Prepaid balance — there is no free tier |
+
+`ValuationProvider.keySignupURL` / `keySteps` / `keyCostNote` hold those four facts, so the Account
+sheet's sections and the About sheet's **Getting an API key** are printed from one source and cannot
+send you to two different pages. The offline harness pins the two addresses (check 47).
 
 ---
 
@@ -972,15 +990,16 @@ driving a consumer web page" is not, deliberately.
     toolbar buttons, so a squared-off corner means the same opt-out plus a `ButtonStyle` that owns the
     fill, the corner (5pt — a capsule is nearly half the button's height), the hairline and the hover
     and press states, rather than trying to reshape the system's. **Account** (`⌘,`) is the old gear,
-    unchanged behind the glass: `SiteSettingsSheet` still holds the site email and password, the
-    provider, the model and the provider's own key, and its tooltip carries the summary line the
-    folded card used to print ("no site login · Gemini · gemini-2.5-flash · no key") — the move must
-    not hide *which* provider is armed or whether it has a key, because those two facts decide
-    whether the table's **Eval** and **Price** buttons do anything. The gear's orange dot came back
-    for the same reason: with a tooltip and a button that say nothing at rest, the dot is what warns
-    that no key is set and nothing can be scanned. **Tuning** opens `RunTuningSheet`, which is the
-    folding card's contents as a modal — the run's limits (`Pages`, **Requests / min**,
-    **Photos / scan**) over a hairline, then the bidding judgement (the three confidence percentages
+    unchanged behind the glass: `SiteSettingsSheet` still holds the site email and password, and both
+    providers' keys and models — a section each, since deviation 36 — and its tooltip carries the
+    summary line the folded card used to print ("no site login · Gemini · gemini-2.5-flash · key set ·
+    DeepSeek · deepseek-flash · no key"). The move must not hide *which* provider is armed or whether
+    it has a key, because those two facts decide whether the table's **Eval** and **Price** buttons do
+    anything. The gear's orange dot came back for the same reason: with a tooltip and a button that say
+    nothing at rest, the dot is what warns that no key is set and nothing can be scanned. **Tuning**
+    opens `RunTuningSheet`, which is the folding card's contents as a modal — the run's limits
+    (`Pages`, **Requests / min**, **Photos / scan**) over a hairline, then the bidding judgement (the
+    three confidence percentages
     and the anchor threshold), one field per line so the captions line up and each control keeps the
     whole width. The fields themselves are unchanged and still built from `SettingsFieldRow`, so the
     two sheets cannot drift apart; edits still apply as typed, which is why both footers say
@@ -1621,6 +1640,30 @@ driving a consumer web page" is not, deliberately.
     frames *plus* the repeated photographs they stand for, so the bar still reaches the gallery the run
     was asked for.
 
+36. **Both keys are on screen at once; the provider menu that hid one of them is gone.** The Account
+    sheet had a single credential field whose contents followed a **Provider** menu above it, so
+    Gemini's key and DeepSeek's shared one box. That was lossless in `UserDefaults` — each provider has
+    always stored its own key and model, and the menu only chose which one was *drawn* — but it read as
+    the opposite: paste a key, switch the menu, and the field comes back empty, which is
+    indistinguishable from "it threw my key away". A key is pasted once and read back months later, so
+    the sheet now answers its own questions. Each provider owns a **section** — its key, its own model
+    picker, a green/amber chip saying whether that key is set, and the page the key comes from — and both
+    sections are always drawn, which makes "which keys do I have?" one glance and "paste the other one"
+    one click. What is left of that menu is the one choice the app genuinely has, now a segmented
+    **Appraise with** control: which service prices lots, because the two routes really differ (DeepSeek
+    batches a gallery into a manifest, Gemini reads it frame by frame — deviation 33). The sheet's header
+    pill counts keys instead of naming the armed provider alone, and the panel's **Account** tooltip
+    names both (`no site login · Gemini · gemini-2.5-flash · key set · DeepSeek · deepseek-flash · no
+    key`) — both printed from `AppSettings.providerKeyStates`, so the two surfaces cannot disagree. The
+    key gate itself is untouched: the table's **Eval** and **Price** buttons still go by the *armed*
+    provider's key or nothing, and the sheet's warning says which section is missing one (and points at
+    the other service when it already has a key). `ValuationProvider` grew the facts the sections print —
+    the site a key comes from, its page, what the key costs, and the steps to get one — because the same
+    four facts are what the About sheet's new **Getting an API key** section needs, and the app had no
+    answer to "where do I get a key?" at all before this: it asked for one, named a provider, and stopped
+    there. Two pages are pinned offline in the harness (check 47) so neither surface can send the
+    operator somewhere else, and the About box renders them as steps with the page as a link.
+
 ---
 
 Selectors live in data, not code: edit `ScrapeProfilePresets.genericBase()` or add a new
@@ -1688,7 +1731,7 @@ when a card carries three links.
 | "Automation ready" never logs | The page blocked main-frame injection or JavaScript. Open the auction page (the **info** glyph) and inspect. |
 | Login never completes | Wrong form selectors, or a challenge screen. Open the auction page (the **info** glyph) to see what the site is asking. |
 | A lot is skipped or failed | The provider returned an unusable reply, or images failed to download. The row shows the reason and the console has the detail. Press **Price** again on that row — a failure is per lot, not per run. |
-| A row's **Price** button is greyed out | The selected provider has no key (**Account, ⌘, → API key** — **Account** wears an orange dot while that is the case), or the lot is already appraised. The progress modal's status line names which. Rows are also locked while a scrape or an all-lots batch is running — press its **Stop**, or wait. |
+| A row's **Price** button is greyed out | The armed provider has no key — **Account** (`⌘,`) gives each service its own section and each says `key set` or `no key yet`, and **Account** itself wears an orange dot while the armed one has none — or the lot is already appraised. The progress modal's status line names which. Rows are also locked while a scrape or an all-lots batch is running — press its **Stop**, or wait. |
 | A row's **Eval** button is greyed out | The same key gate as **Price**, or the lot already has an appraisal: a real valuation hides provisional figures, so evaluating it again would buy a number nothing shows. Use **Reset valuations** in the table menu first. |
 | **Eval selected** / **Price selected** is greyed out | Nothing is checked — no badge in the strip under the table, and the header's box is empty — or the same key / busy gate as the **…all** buttons (a scrape or a batch owns the pipeline; press its **Stop**, or wait). **Eval selected** is also dead when every checked lot already carries a valuation, for the reason its sibling above is: a valuation hides the provisional figure an eval writes. Uncheck those rows, or clear them with **Reset valuations**. |
 | The checks clear themselves when I scrape again | Working as intended, but only for the lots that are gone: a check belongs to a lot's `id`, and a run that replaces the board drops the ids that are no longer in it — otherwise **Price selected** would stand lit over an empty set. A lot that comes back from the same listing keeps its check. |

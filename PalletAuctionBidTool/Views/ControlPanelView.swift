@@ -367,10 +367,12 @@ struct ControlPanelView: View {
     /// This is the folded login card's summary line, kept verbatim: moving credentials behind a sheet
     /// must not hide *which* provider is armed or whether it has a key, because those two facts
     /// decide whether the table's **Eval** and **Price** buttons do anything.
+    ///
+    /// Both providers are named, armed one first: the sheet shows a key section for each, so the
+    /// tooltip has to be able to say that the key which is *not* in use is still there.
     private var settingsSummary: String {
         var parts: [String] = [settings.email.isEmpty ? "no site login" : settings.email]
-        parts.append("\(settings.provider.displayName) · \(settings.activeModelID)")
-        parts.append(settings.hasAPIKey ? "key set" : "no key")
+        parts.append(contentsOf: settings.providerKeyStates.map(\.summary))
         return parts.joined(separator: "  ·  ")
     }
 

@@ -18,6 +18,14 @@ import SwiftUI
 /// footer's button is labelled **Done** and the footnotes say as much. That is deliberate: the value
 /// of a half-typed API key is nothing, and a modal that silently discarded edits on Escape would be
 /// a worse trap than one that always applies them.
+///
+/// The appraiser is chosen here as well, but no longer *above* a single credential field: **Gemini**
+/// and **DeepSeek** own a section each, both drawn, each holding its own key, its own model and the
+/// page its key comes from. A field whose contents swapped as a different control moved read as
+/// though the other key had been thrown away — and with two keys that are pasted once and re-read
+/// months later, "did it keep the other one?" is the one question this sheet must never leave open.
+/// The choice that remains is which service appraises a lot, and it is a segmented control because it
+/// is a choice the app genuinely has: the two routes differ (see `batchesPhotographs`).
 struct SiteSettingsSheet: View {
 
     @Bindable var settings: AppSettings
@@ -35,7 +43,8 @@ struct SiteSettingsSheet: View {
             header
             Divider().opacity(0.6)
             siteSessionRow
-            valuationRow
+            appraiserRow
+            keySections
             readingsRow
             warning
             footnotes
@@ -60,22 +69,27 @@ struct SiteSettingsSheet: View {
         }
     }
 
-    /// The question the orange dot on the titlebar's **Account** button raises, answered for this
-    /// modal's fields alone: is anything set up to appraise a lot?
+    /// The question the orange dot on the titlebar's **Account** button raises, answered for both
+    /// providers at once: which of them could appraise a lot right now?
+    ///
+    /// It counts keys rather than naming the armed one alone, because the sheet now shows both — an
+    /// operator who pasted a Gemini key and then armed DeepSeek needs to see that Gemini's key is the
+    /// only one there. The tint still follows the *armed* provider, because that is the one the
+    /// table's **Eval** and **Price** buttons will use.
     private var statusPill: some View {
-        let ready = settings.hasAPIKey
-        let text = ready ? "\(settings.provider.displayName) ready" : "No API key yet"
-        let tint: Color = ready ? .green : .orange
+        let ready = settings.providerKeyStates.filter(\.isReady).map(\.provider.displayName)
+        let readyText = ready.isEmpty ? "No API key yet" : ready.joined(separator: " + ") + " ready"
+        let tint: Color = settings.hasAPIKey ? .green : .orange
 
-        return Label(text, systemImage: ready ? "checkmark.circle" : "key")
+        return Label(readyText, systemImage: settings.hasAPIKey ? "checkmark.circle" : "key")
             .font(.caption.weight(.medium))
             .foregroundStyle(tint)
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
             .background(tint.opacity(0.12), in: Capsule())
             .help(
-                "Run Tuning decides how far a run walks and how fast it calls out; this modal "
-                    + "supplies the credential those calls are made with."
+                "Green once the provider appraising lots has a key; each service keeps its own, in its "
+                    + "own section below."
             )
     }
 
@@ -106,48 +120,103 @@ struct SiteSettingsSheet: View {
         }
     }
 
-    /// Row two: who appraises — provider and model on one line, the credential on its own below.
+    /// Row two: which service appraises a lot.
     ///
-    /// The key gets a full-width line on purpose: it is a long opaque string that is pasted, not
-    /// typed, and a 100-point box beside two pickers shows six characters of it.
-    private var valuationRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: Theme.controlSpacing) {
-                SettingsFieldRow(label: "Provider") {
-                    Picker("Provider", selection: $settings.provider) {
-                        ForEach(ValuationProvider.allCases) { provider in
-                            Text(provider.displayName).tag(provider)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .help("Which service appraises lots. Gemini has a free tier; DeepSeek is paid per token.")
+    /// This was the **Provider** menu that sat above the credential field, and it is now two visible
+    /// buttons because it is a real choice with two real answers: DeepSeek sends a gallery in batches
+    /// into a manifest, Gemini reads it frame by frame, and Run Tuning's photograph controls follow
+    /// whichever is armed. What it no longer does is decide *which key you can see* — that was the
+    /// menu's only harmful job, and the sections below do it instead.
+    private var appraiserRow: some View {
+        SettingsFieldRow(label: "Appraise with") {
+            Picker("Appraise with", selection: $settings.provider) {
+                ForEach(ValuationProvider.allCases) { provider in
+                    Text(provider.displayName).tag(provider)
                 }
-                .frame(width: 230)
-
-                SettingsFieldRow(label: "Model") {
-                    Picker("Model", selection: modelBinding) {
-                        ForEach(settings.provider.availableModelIDs, id: \.self) { model in
-                            Text(model).tag(model)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .help("Only multimodal models are listed: Price sends the lot's photographs.")
-                }
-                .frame(maxWidth: .infinity)
             }
-
-            SettingsFieldRow(label: settings.provider.keyLabel) {
-                SecureField(settings.provider.keyPlaceholder, text: keyBinding)
-                    .help(settings.provider.keyHelp)
-            }
-
-            Text("Each provider keeps its own key and model, so switching back and forth is lossless.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            .pickerStyle(.segmented)
+            .help(
+                "Which service appraises lots. Gemini reads a gallery frame by frame and has a free "
+                    + "tier; DeepSeek sends it in batches from a prepaid balance."
+            )
         }
     }
 
-    /// Row three: the readings this machine has already paid for.
+    /// Row three: one section per provider, both always drawn.
+    ///
+    /// A pair rather than one field, so "which keys do I have?" is one glance and "paste the other
+    /// one" is one click. The spacing is tighter than `Theme.groupSpacing` because these two read as
+    /// one control with two halves.
+    private var keySections: some View {
+        VStack(spacing: 10) {
+            ForEach(ValuationProvider.allCases) { provider in
+                keySection(provider)
+            }
+        }
+    }
+
+    /// One provider's own section: its key, its model, and where its key comes from.
+    ///
+    /// The label, the placeholder and the help all come from the provider itself, so a section cannot
+    /// describe the wrong service's key — and the get-a-key line is the page the About sheet sends the
+    /// operator to, from the same property.
+    private func keySection(_ provider: ValuationProvider) -> some View {
+        let armed = settings.provider == provider
+        let ready = settings.hasAPIKey(for: provider)
+
+        return VStack(alignment: .leading, spacing: Theme.fieldSpacing) {
+            HStack(spacing: 8) {
+                Text(provider.displayName)
+                    .font(.subheadline.weight(.semibold))
+
+                Label(
+                    ready ? "key set" : "no key yet",
+                    systemImage: ready ? "checkmark.circle.fill" : "key"
+                )
+                .chipStyle(tint: ready ? .green : .orange)
+
+                if armed {
+                    Text("appraises lots").chipStyle(tint: .accentColor)
+                }
+
+                Spacer(minLength: 8)
+
+                // The cost rides on the header rather than under the field: it is the one fact that
+                // differs between the two sections, and a line of its own under each would make the
+                // pair a scroll taller for no more information.
+                Text(provider.keyCostNote)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+
+            SettingsFieldRow(label: provider.keyLabel) {
+                SecureField(provider.keyPlaceholder, text: apiKeyBinding(provider))
+                    .help(provider.keyHelp)
+            }
+
+            SettingsFieldRow(label: "Model") {
+                Picker("Model", selection: modelBinding(provider)) {
+                    ForEach(provider.availableModelIDs, id: \.self) { model in
+                        Text(model).tag(model)
+                    }
+                }
+                .pickerStyle(.menu)
+                .help("Only multimodal models are listed: a scan sends the lot's photographs.")
+            }
+
+            Link(destination: provider.keySignupURL) {
+                Text("Get a key from \(provider.keySourceName) — \(provider.keySignupLabel)")
+            }
+            .font(.caption2)
+            .lineLimit(1)
+            .help("Opens \(provider.keySignupURL.absoluteString) in your browser.")
+        }
+        .padding(10)
+        .cardStyle()
+    }
+
+    /// Row four: the readings this machine has already paid for.
     ///
     /// A thorough scan buys an answer about each photograph and keeps it, so re-scanning a lot with the
     /// same model costs the reconciliation rather than the whole gallery — and that only works while the
@@ -201,13 +270,25 @@ struct SiteSettingsSheet: View {
         }
     }
 
-    /// Shown only when the combination is actually a problem: no key, so nothing can be appraised.
+    /// Shown only when the combination is actually a problem: the armed provider has no key, so
+    /// nothing can be appraised.
+    ///
+    /// It names the section that needs the key rather than the provider in the abstract — the sheet
+    /// has two boxes that look alike, and "paste a DeepSeek API key" is a riddle when neither section
+    /// is labelled with that sentence. When the *other* provider already has a key it says so, because
+    /// switching appraisers is a one-click answer that needs no key at all.
     @ViewBuilder
     private var warning: some View {
         if !settings.hasAPIKey {
+            let standby = settings.providerKeyStates
+                .first { $0.provider != settings.provider && $0.isReady }
+            let tail = standby.map {
+                " \($0.provider.displayName) already has one, so Appraise with can switch to it now."
+            } ?? ""
+
             Label(
-                "Paste a \(settings.provider.displayName) API key above and the table's Eval and "
-                    + "Price buttons light up.",
+                "Nothing can be appraised yet: the \(settings.provider.displayName) section above has "
+                    + "no key." + tail,
                 systemImage: "exclamationmark.triangle"
             )
             .font(.caption)
@@ -218,8 +299,8 @@ struct SiteSettingsSheet: View {
 
     private var footnotes: some View {
         Text(
-            "Edits apply as you type — there is no Cancel. Keys stay in this Mac's UserDefaults and "
-                + "are sent only to the provider you picked."
+            "Edits apply as you type — there is no Cancel. Keys stay in this Mac's UserDefaults, are sent "
+                + "only to the provider they belong to, and switching between them is lossless."
         )
         .font(.caption2)
         .foregroundStyle(.tertiary)
@@ -230,7 +311,7 @@ struct SiteSettingsSheet: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Text(settings.provider.keyHelp)
+            Text("Appraising with \(settings.provider.displayName) · \(settings.activeModelID)")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(2)
@@ -245,30 +326,24 @@ struct SiteSettingsSheet: View {
 
     // MARK: - Provider bindings
 
-    /// The model field follows the selected provider: it reads `activeModelID` (which falls back to
-    /// that provider's default when nothing is stored) and writes the provider's own key.
-    private var modelBinding: Binding<String> {
+    /// The credential field for one *named* provider.
+    ///
+    /// One binding per provider rather than one that follows `settings.provider`: both sections are on
+    /// screen together, so each writes its own key and neither can overwrite the other — which is the
+    /// bug the old single field invited.
+    private func apiKeyBinding(_ provider: ValuationProvider) -> Binding<String> {
         Binding(
-            get: { settings.activeModelID },
-            set: { newValue in
-                switch settings.provider {
-                case .gemini: settings.modelID = newValue
-                case .deepSeek: settings.deepSeekModelID = newValue
-                }
-            }
+            get: { settings.apiKey(for: provider) },
+            set: { settings.setAPIKey($0, for: provider) }
         )
     }
 
-    /// Same idea for the credential field: one visible field, two stored keys.
-    private var keyBinding: Binding<String> {
+    /// The model field for one named provider, read through `modelID(for:)` so an empty stored value
+    /// shows the provider's default instead of leaving the picker blank.
+    private func modelBinding(_ provider: ValuationProvider) -> Binding<String> {
         Binding(
-            get: { settings.activeAPIKey },
-            set: { newValue in
-                switch settings.provider {
-                case .gemini: settings.apiKey = newValue
-                case .deepSeek: settings.deepSeekAPIKey = newValue
-                }
-            }
+            get: { settings.modelID(for: provider) },
+            set: { settings.setModelID($0, for: provider) }
         )
     }
 }

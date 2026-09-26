@@ -5,7 +5,9 @@
 //  Compiles the real services (Services/LotValuation.swift, GeminiValuationService.swift,
 //  DeepSeekValuationService.swift) against a URLProtocol stub, so the 429 retry loop,
 //  Retry-After handling, RequestPacer pacing, request shaping and the shared decode can be
-//  checked without a key and without touching the network. Not part of the app target.
+//  checked without a key and without touching the network. The provider list's own copy is
+//  checked too (where each key comes from, what it costs), because two sheets print it and
+//  neither may drift from the README. Not part of the app target.
 //
 
 import Foundation
@@ -3412,6 +3414,65 @@ do {
     ])
     check(merged.labelText == ["Cold Brew Coffee", "Yankee Candle Company"] && merged.imagesRead == 2,
           "and the lot-wide roll-up keeps both frames' wording", detail: "\(merged.labelText)")
+}
+
+// MARK: - 47. Where each key comes from
+
+do {
+    print("47. Each provider names the page its key comes from, and what that key costs")
+
+    // Both the Account sheet's two sections and the About box's instructions are printed from these,
+    // so a provider that could not answer would ship a sheet whose only guidance is "paste a key".
+    for provider in ValuationProvider.allCases {
+        check(provider.keySignupURL.scheme == "https" && provider.keySignupURL.host() != nil,
+              "\(provider.displayName)'s key page is an https address",
+              detail: provider.keySignupURL.absoluteString)
+        check(provider.keySourceName.count > 3,
+              "and the site is named for the operator", detail: provider.keySourceName)
+        check(provider.keySteps.count >= 2,
+              "with steps to follow", detail: "\(provider.keySteps.count) step(s)")
+        check(provider.keySteps.allSatisfy { !$0.contains("**") && !$0.contains("`") },
+              "written as plain sentences, because the About box prints them as plain text")
+        check(provider.keySignupLabel == provider.keySignupURL.absoluteString
+                .replacingOccurrences(of: "https://", with: ""),
+              "and the link it prints is the page it opens", detail: provider.keySignupLabel)
+    }
+
+    // The two pages the README documents, pinned here: a link that drifts is a first run that ends in
+    // a search engine.
+    check(ValuationProvider.gemini.keySignupURL.absoluteString == "https://aistudio.google.com/apikey",
+          "Gemini's key comes from AI Studio", detail: ValuationProvider.gemini.keySignupURL.absoluteString)
+    check(ValuationProvider.deepSeek.keySignupURL.absoluteString == "https://platform.deepseek.com/api_keys",
+          "and DeepSeek's from its own platform",
+          detail: ValuationProvider.deepSeek.keySignupURL.absoluteString)
+
+    // What each one costs, stated separately — that difference is the whole reason the sheet shows both
+    // keys at once rather than one at a time.
+    check(ValuationProvider.gemini.keyCostNote.lowercased().contains("free"),
+          "Gemini's key is described as free", detail: ValuationProvider.gemini.keyCostNote)
+    check(ValuationProvider.deepSeek.keyCostNote.lowercased().contains("prepaid"),
+          "and DeepSeek's as prepaid", detail: ValuationProvider.deepSeek.keyCostNote)
+
+    // Nothing in either section may be mistakable for the other's: two boxes with the same label and
+    // the same placeholder would be a key pasted into the wrong service.
+    check(ValuationProvider.gemini.keyLabel != ValuationProvider.deepSeek.keyLabel,
+          "the two sections are labelled for different services",
+          detail: "\(ValuationProvider.gemini.keyLabel) / \(ValuationProvider.deepSeek.keyLabel)")
+    check(ValuationProvider.gemini.keyPlaceholder.hasPrefix("AIza")
+            && ValuationProvider.deepSeek.keyPlaceholder.hasPrefix("sk-"),
+          "and each field shows the shape of its own key",
+          detail: "\(ValuationProvider.gemini.keyPlaceholder) / \(ValuationProvider.deepSeek.keyPlaceholder)")
+
+    // The row the Account sheet's header and the panel's tooltip both read.
+    let armed = ProviderKeyState(provider: .gemini, isReady: true, modelID: "gemini-2.5-flash")
+    let idle = ProviderKeyState(provider: .deepSeek, isReady: false, modelID: "deepseek-flash")
+    check(armed.summary == "Gemini · gemini-2.5-flash · key set",
+          "a provider with a key reads as key set", detail: armed.summary)
+    check(idle.summary == "DeepSeek · deepseek-flash · no key",
+          "and one without reads as no key", detail: idle.summary)
+    check(armed.id == ValuationProvider.gemini.rawValue && idle.id == ValuationProvider.deepSeek.rawValue,
+          "each row is identified by its provider, so a list of both cannot mix them up",
+          detail: "\(armed.id) / \(idle.id)")
 }
 
 print(tally.value == 0 ? "\nALL CHECKS PASSED" : "\n\(tally.value) CHECK(S) FAILED")

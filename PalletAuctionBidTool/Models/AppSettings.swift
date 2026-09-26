@@ -14,7 +14,7 @@ import Observation
 /// stored properties into observation-tracked ones, and keeping the write path as a single
 /// explicit call keeps that interaction obvious and testable.
 ///
-/// - Note: credentials and the API key are stored in the app's `UserDefaults` domain, which is
+/// - Note: credentials and the API keys are stored in the app's `UserDefaults` domain, which is
 ///   inside the user's own container. A production build should move these two fields to the
 ///   Keychain; see the README.
 @MainActor
@@ -318,17 +318,30 @@ final class AppSettings {
         return url
     }
 
-    /// The key belonging to the selected provider.
-    var activeAPIKey: String {
+    /// The key stored for one provider, named explicitly.
+    ///
+    /// The Account sheet shows both providers at once, so it asks *by name* rather than reading
+    /// whichever one `provider` happens to point at. Every reader goes through these, so there is
+    /// still exactly one place that knows a provider keeps its credential in its own field.
+    func apiKey(for provider: ValuationProvider) -> String {
         switch provider {
         case .gemini: apiKey
         case .deepSeek: deepSeekAPIKey
         }
     }
 
-    /// The model belonging to the selected provider, falling back to its default when the stored
-    /// choice is empty (a fresh install, or a reset).
-    var activeModelID: String {
+    /// Stores a key against the provider it belongs to, so a section can write without caring which
+    /// field that provider's key lives in.
+    func setAPIKey(_ value: String, for provider: ValuationProvider) {
+        switch provider {
+        case .gemini: apiKey = value
+        case .deepSeek: deepSeekAPIKey = value
+        }
+    }
+
+    /// The model one provider would use, falling back to its default when the stored choice is empty
+    /// (a fresh install, or a reset).
+    func modelID(for provider: ValuationProvider) -> String {
         let stored = switch provider {
         case .gemini: modelID
         case .deepSeek: deepSeekModelID
@@ -336,10 +349,43 @@ final class AppSettings {
         return stored.isEmpty ? provider.defaultModelID : stored
     }
 
+    /// Stores a model against the provider it belongs to.
+    func setModelID(_ value: String, for provider: ValuationProvider) {
+        switch provider {
+        case .gemini: modelID = value
+        case .deepSeek: deepSeekModelID = value
+        }
+    }
+
+    /// `true` when one *named* provider has a non-blank credential — `hasAPIKey` asked of a provider
+    /// that is not necessarily the armed one, which is what the sheet's two sections and its header
+    /// need.
+    func hasAPIKey(for provider: ValuationProvider) -> Bool {
+        !apiKey(for: provider).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The key belonging to the selected provider.
+    var activeAPIKey: String { apiKey(for: provider) }
+
+    /// The model belonging to the selected provider, falling back to its default when the stored
+    /// choice is empty (a fresh install, or a reset).
+    var activeModelID: String { modelID(for: provider) }
+
     /// `true` when the *selected* provider has a credential, which is what the Run button and the
     /// readiness note care about.
-    var hasAPIKey: Bool {
-        !activeAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    var hasAPIKey: Bool { hasAPIKey(for: provider) }
+
+    /// Both providers with their key state, the armed one first.
+    ///
+    /// What the surfaces that speak about *both* providers read — the Account sheet's header, its two
+    /// sections and the panel's own tooltip — so the order and the phrase `key set` / `no key` are
+    /// decided once instead of three times.
+    var providerKeyStates: [ProviderKeyState] {
+        let states = ValuationProvider.allCases.map {
+            ProviderKeyState(provider: $0, isReady: hasAPIKey(for: $0), modelID: modelID(for: $0))
+        }
+        // The armed provider leads: it is the fact the operator opened the sheet to check.
+        return states.filter { $0.provider == provider } + states.filter { $0.provider != provider }
     }
 
     /// Whether a scrape can start. Loading lots needs a URL and nothing else: the site login is

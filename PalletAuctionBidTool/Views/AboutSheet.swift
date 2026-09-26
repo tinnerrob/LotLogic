@@ -43,9 +43,9 @@ struct AboutSheet: View {
 
     // MARK: - Topics
 
-    /// The about itself, in reading order: what the app is, the three steps of a session, and the two
-    /// rooms the operator has to know about — the sheet where a run is tuned, and the table's own
-    /// toolbar.
+    /// The about itself, in reading order: what the app is, the three steps of a session, where the
+    /// two API keys come from, and the two rooms the operator has to know about — the sheet where a
+    /// run is tuned, and the table's own toolbar.
     @ViewBuilder
     private var topics: some View {
         topic(
@@ -59,8 +59,10 @@ struct AboutSheet: View {
         bullets(
             "Getting started",
             [
-                "Open Account (⌘,) and set the site's email and password, pick a provider, and paste "
-                    + "its API key. Only the key is required — leave the login blank to scrape anonymously.",
+                "Open Account (⌘,) and set the site's email and password, then paste a key into the "
+                    + "provider section you mean to use — the Gemini one is free, the DeepSeek one "
+                    + "draws on a prepaid balance. Only a key is required — leave the login blank to "
+                    + "scrape anonymously.",
                 "Paste the page that already lists the lots into the Auction URL field and press "
                     + "Scrape Lots. The app walks the number of result pages set under Tuning and "
                     + "fills the table. Stop cancels the scrape and every scan in flight.",
@@ -70,6 +72,8 @@ struct AboutSheet: View {
                     + "Price all do that for every lot with no figure yet."
             ]
         )
+
+        keySources
 
         topic(
             "Reading the table",
@@ -93,12 +97,13 @@ struct AboutSheet: View {
 
         topic(
             "Cost and privacy",
-            "Every scan is on demand, so not pressing a button is the off switch. Account keeps each "
-                + "provider's key and model separately — switching back and forth is lossless — and "
-                + "its Forget button drops the photograph readings cached on this machine. Readings "
-                + "are what a re-scan with the same model reuses, so forgetting them makes the next "
-                + "scan pay for each photograph again. Keys stay in this Mac's UserDefaults and are "
-                + "sent only to the provider you picked."
+            "Every scan is on demand, so not pressing a button is the off switch. The Gemini key is "
+                + "free and the DeepSeek one is not — Getting an API key above has both — and Account "
+                + "keeps each provider's key and model separately, so switching back and forth is "
+                + "lossless. Its Forget button drops the photograph readings cached on this machine; "
+                + "readings are what a re-scan with the same model reuses, so forgetting them makes "
+                + "the next scan pay for each photograph again. Keys stay in this Mac's UserDefaults "
+                + "and are sent only to the provider they belong to."
         )
 
         topic(
@@ -110,6 +115,58 @@ struct AboutSheet: View {
                 + "ends the work. Almost every control also carries its own explanation in a tooltip "
                 + "— hover it."
         )
+    }
+
+    /// **Getting an API key** — the two pages an operator has to find, and what each costs.
+    ///
+    /// The app used to name a provider and ask for a key and leave it there, so a first run ended in a
+    /// search engine: nothing in it said where a key comes from. Both are documented here, in order,
+    /// with the page itself as a link — and the steps, the cost line and the link all come from
+    /// `ValuationProvider`, so this box and the Account sheet cannot send the operator to two
+    /// different places.
+    private var keySources: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Getting an API key")
+                .font(.subheadline.weight(.semibold))
+
+            Text(
+                "Each service keeps its own key and both can be set at once: Account (⌘,) has a section "
+                    + "for each, with its own model, and Appraise with decides which one prices lots."
+            )
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(ValuationProvider.allCases) { provider in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(provider.displayName) — \(provider.keyCostNote)")
+                        .font(.callout.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    ForEach(Array(provider.keySteps.enumerated()), id: \.offset) { index, step in
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
+                            Text("\(index + 1).")
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(.tertiary)
+
+                            Text(step)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Link(destination: provider.keySignupURL) {
+                        Text("Open \(provider.keySourceName) — \(provider.keySignupLabel)")
+                    }
+                    .font(.caption)
+                    .help("Opens \(provider.keySignupURL.absoluteString) in your browser.")
+                }
+                .padding(.top, 2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Chrome
