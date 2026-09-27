@@ -96,11 +96,6 @@ struct ScrapedLot: Identifiable, Codable, Hashable, Sendable {
         return address.isEmpty ? detailURLString : address
     }
 
-    /// `true` when the card carried enough signal to be worth a Gemini call.
-    var isAnalyzable: Bool {
-        !imageURLStrings.isEmpty || !titleOrDescription.isEmpty
-    }
-
     var subject: ValuationSubject {
         ValuationSubject(
             lotNumber: resolvedLotNumber,

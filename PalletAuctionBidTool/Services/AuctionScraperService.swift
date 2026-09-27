@@ -69,23 +69,6 @@ enum ScraperError: LocalizedError, Equatable {
             "Could not read the page result: \(message)"
         }
     }
-
-    /// Short tag used in per-lot status text.
-    var shortReason: String {
-        switch self {
-        case .invalidURL: "invalid URL"
-        case .navigation: "page load failed"
-        case .automationNotInstalled: "automation not installed"
-        case .loginFormNotFillable: "login form unusable"
-        case .loginRejected: "login rejected"
-        case .loginTimedOut: "login timed out"
-        case .manualVerificationRequired: "manual verification required"
-        case .noLotsFound: "no lots found"
-        case .noActiveLots: "no active listings"
-        case .javaScript: "page script error"
-        case .decoding: "unreadable page result"
-        }
-    }
 }
 
 // MARK: - JavaScript payload contracts
