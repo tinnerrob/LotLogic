@@ -125,17 +125,6 @@ final class AnalysisCoordinator {
     /// The batch started by the table's **Eval all** button.
     private var prePriceBatchTask: Task<Void, Never>?
 
-    /// Lot pages already read in this run, keyed by lot: the gallery *and* the description the page
-    /// carried (see `subjectForLotPage`).
-    ///
-    /// The page is read at most **once per lot per action**, because the two things it is read for —
-    /// the photographs a scan appraises from, and the listing's own description that both passes build
-    /// their prompt from — are wanted first by the cheap pass and then by the photographed one, and a
-    /// second GET would buy nothing. Entries are dropped when an action starts for that lot and when a
-    /// run is reset, so a retry re-reads the page rather than reusing a gallery from an earlier
-    /// attempt.
-    private var lotPageSubjects: [UUID: ValuationSubject] = [:]
-
     /// Set when **Stop** cancelled a scan, so the closing status line says "stopped" rather than
     /// "finished".
     private var scansWereStopped = false
@@ -326,7 +315,6 @@ final class AnalysisCoordinator {
             }
         }
     }
-
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -780,7 +768,6 @@ final class AnalysisCoordinator {
     private func resetRunState() {
         lots.removeAll()
         seenLotKeys.removeAll()
-        lotPageSubjects.removeAll()
         appraisalJob = nil
         resetInHandRow()
         pagesExtracted = 0
@@ -1003,10 +990,6 @@ final class AnalysisCoordinator {
 
         let service = makeValuationService(settings, scanReporter(for: lot))
         let card = lot.valuationSubject
-        // A fresh click re-reads the lot's page: the gallery on it may have changed since the last
-        // attempt, and a row that failed a moment ago is exactly the row worth retrying.
-        lotPageSubjects[lot.id] = nil
-
         lot.markAnalyzing()
         // The job in hand is this one row — or one more row onto the same job, if another **Price**
         // is still running. The readout points at it before anything is requested, so its own figures
@@ -1023,25 +1006,48 @@ final class AnalysisCoordinator {
         )
 
         scanTasks[lot.id] = Task { @MainActor [weak self] in
-            // The lot's own page is read first, and both passes are built from it — see
+            // The lot's own page is read first — freshly, every time, so a retry prices the lot from
+            // the listing as it stands now — and both passes are built from it: see
             // `subjectForLotPage`. A page that will not read is not a failure: the card's thumbnails
             // and its teaser stand in, and the log says so (deviation 24).
             let subject = await self?.subjectForLotPage(lot) ?? card
-
-            // The cheap text-only first look: the row shows a provisional figure while the
-            // photographed pass is still being paid for. It sends no photographs, but it reads the
-            // same description the scan will — the page's copy, not the card's teaser.
-            await self?.runPrePrice(lot, subject: subject, using: service, automatic: true)
-
-            let result: Result<ValuationOutcome, Error>
-            do {
-                result = .success(try await service.value(subject: subject))
-            } catch {
-                result = .failure(error)
-            }
             guard let self else { return }
+
+            // The lot's whole walk, which is also what a batch runs once per lot: see `appraise`.
+            let result = await self.appraise(lot, subject: subject, using: service)
             // Through the hop rather than called here: see `onMainActor`.
             await self.onMainActor { self.finishScan(of: lot, with: result) }
+        }
+    }
+
+    /// One lot's appraisal, from its own page to its price — the whole of what a row's **Price**
+    /// does, in the order it does it.
+    ///
+    /// This is the walk **Price all** / **Price selected** runs once per lot (`appraiseEach`), so which
+    /// button paid for a lot cannot change how the lot is priced: the same cheap text-only pass runs
+    /// immediately in front of the same photographed appraisal, off the same page-derived subject,
+    /// through the same transport, and both callers end it in the same `finishScan`.
+    ///
+    /// - Parameters:
+    ///   - subject: the lot's own page, already read by the caller (`subjectForLotPage`), so both
+    ///     passes are built from the page's gallery and copy rather than from the card's teaser.
+    ///   - service: the transport to spend. A click builds one for its own row; a batch passes the one
+    ///     service it built for every lot in it, so the batch's requests stay on one `RequestPacer`.
+    /// - Returns: what the caller hands to `finishScan`.
+    private func appraise(
+        _ lot: LotItem,
+        subject: ValuationSubject,
+        using service: ValuationService
+    ) async -> Result<ValuationOutcome, Error> {
+        // The cheap text-only first look: the row shows a provisional figure while the photographed
+        // pass is still being paid for. It sends no photographs, but it reads the same description
+        // the scan will — the page's copy, not the card's teaser.
+        await runPrePrice(lot, subject: subject, using: service)
+
+        do {
+            return .success(try await service.value(subject: subject))
+        } catch {
+            return .failure(error)
         }
     }
 
@@ -1057,11 +1063,12 @@ final class AnalysisCoordinator {
     /// the request carries the login session and the results page never moves; the whole path is
     /// best-effort, because a scan must not fail over a page that will not read.
     ///
-    /// Read once per lot per action and remembered in `lotPageSubjects`: the cheap pass and the
-    /// photographed pass want the same two things, and a second GET would buy nothing.
+    /// Read **once per lot per action**, and never remembered past it: the walk that is about to spend
+    /// on the lot makes this its first step and hands the subject it reads back to every pass that walk
+    /// runs — a **Price**'s cheap text-only pass and the photographed one behind it, or an **Eval**'s
+    /// single text-only pass — so the one GET is paid for once, and a retry re-reads the listing rather
+    /// than pricing the lot from a gallery an earlier attempt happened to see.
     private func subjectForLotPage(_ lot: LotItem) async -> ValuationSubject {
-        if let cached = lotPageSubjects[lot.id] { return cached }
-
         let card = lot.valuationSubject
         guard let detailURL = lot.detailURL else { return card }
         // No scraper, or one that has never loaded a page: there is no session to read the lot page
@@ -1092,19 +1099,16 @@ final class AnalysisCoordinator {
                 .withImages(report.imageURLs)
 
             // A page that read but carried neither thing worth having leaves the card alone, and says
-            // so — otherwise the log would read as if the page had contributed something. The card is
-            // still remembered, so the second pass does not fetch the same page again for nothing.
+            // so — otherwise the log would read as if the page had contributed something.
             guard subject != card else {
                 log(
                     "Lot \(lot.lotNumber): \(report.summary) — nothing the card did not already have",
                     source: .scraper
                 )
-                lotPageSubjects[lot.id] = card
                 return card
             }
 
             log("Lot \(lot.lotNumber): \(report.summary)", source: .scraper)
-            lotPageSubjects[lot.id] = subject
             return subject
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -1140,8 +1144,6 @@ final class AnalysisCoordinator {
 
         let service = makeValuationService(settings, { _ in })
         let card = lot.valuationSubject
-        lotPageSubjects[lot.id] = nil
-
         lot.markPrePricing()
         // One row's **Eval**: the readout counts this row, not the board it sits on — and points at it
         // straight away, so the modal's money line is about the lot the operator just clicked.
@@ -1247,9 +1249,6 @@ final class AnalysisCoordinator {
         if let first = targets.first { pointReadout(at: first) }
         phase = .valuing
         statusText = "Evaluating \(targets.count) \(scope.jobPhrase) from their listing text"
-        // A fresh batch re-reads every lot's page: the descriptions are what makes the text-only pass
-        // worth paying for, and a page read during an earlier attempt must not stand in for this one.
-        lotPageSubjects.removeAll()
         log(
             "Evaluating \(targets.count) \(scope.jobPhrase) with \(settings.provider.displayName) "
                 + "\(settings.activeModelID) — each lot's own description, no images, "
@@ -1260,7 +1259,7 @@ final class AnalysisCoordinator {
         let service = makeValuationService(settings, { _ in })
         let concurrency = AppSettings.batchConcurrency
         prePriceBatchTask = Task { @MainActor [weak self] in
-            await self?.prePrice(targets, using: service, concurrency: concurrency, automatic: false)
+            await self?.prePriceEach(targets, using: service, concurrency: concurrency)
             guard let self else { return }
             // Asked here rather than inside the hop below: `Task.isCancelled` answers for whichever
             // task asks, and the answer that matters belongs to this one.
@@ -1282,14 +1281,17 @@ final class AnalysisCoordinator {
         log(stopped ? "Eval batch stopped" : "Eval batch finished — \(prePricedCount) lot(s) evaluated")
     }
 
-
     /// One row's pre-price *inside a scan*, when there is still something to gain.
     ///
-    /// `automatic` is what separates the two callers: the automatic pass is the one that stands aside
-    /// for a row that already has numbers, while an explicit click (see `prePrice(_:)`) is honoured
-    /// either way.
+    /// A **Price** rides this pass along in front of its photographed appraisal — the same pass in the
+    /// same place whether that **Price** was clicked on the row or run for it by a batch (deviation 41) —
+    /// and the row decides whether it runs: a row that already has numbers is left alone
+    /// (`hasValuation`), and so is one an earlier eval has already answered (`isPrePriced`), because the
+    /// point of the pass is a figure where there is none. A row's own **Eval** is a different road
+    /// entirely — an explicit request is honoured either way, which is why it sends its own request
+    /// rather than coming through here (`prePrice(_:)`).
     ///
-    /// The automatic pass is unconditional now. It used to sit behind a **Text-only first look**
+    /// It is unconditional otherwise. It used to sit behind a **Text-only first look**
     /// switch, and the switch was the wrong place for the decision: what it bought was a provisional
     /// figure for a row that has none, which is exactly what a row with no figure wants, and the
     /// alternative — a photographed scan with no text to correct it — is the one another setting
@@ -1297,13 +1299,11 @@ final class AnalysisCoordinator {
     private func runPrePrice(
         _ lot: LotItem,
         subject: ValuationSubject,
-        using service: ValuationService,
-        automatic: Bool
+        using service: ValuationService
     ) async {
-        if automatic {
-            guard !lot.hasValuation, !lot.isPrePriced else { return }
-        }
-        guard !lot.isPrePricing else { return }
+        // The row's rule, plus one of this pass's own: an eval already in flight for that row must not
+        // be doubled by a walk arriving behind it.
+        guard !lot.hasValuation, !lot.isPrePriced, !lot.isPrePricing else { return }
 
         // Make the provisional state visible the moment the request starts, so a slow model reads
         // as "thinking" rather than as nothing happening — on the row and on the modal's step line.
@@ -1382,10 +1382,13 @@ final class AnalysisCoordinator {
 
     /// The body of **Price all** and **Price selected**: one appraisal pass over `targets`.
     ///
-    /// Uses the same bounded-width task group the per-row button does, so
-    /// `AppSettings.batchConcurrency` still means something, and it is exclusive with the per-row
-    /// button so a batch can never queue a second request
-    /// for a lot somebody just clicked.
+    /// It is the per-row button, once per lot, bounded: every lot runs that row's own walk
+    /// (`appraise`) — its page, its cheap text-only pass, its photographed pass — and ends in the
+    /// same `finishScan` a click ends in, so a batch figure and a clicked figure are produced the
+    /// same way, in the same order, off the same page. What the batch adds is only what a series of
+    /// clicks cannot do for themselves: the job is the button's own set rather than one row's, and at
+    /// most `AppSettings.batchConcurrency` lots walk at a time. It is exclusive with the per-row
+    /// button so a batch can never queue a second request for a lot somebody just clicked.
     private func scanBatch(_ targets: [LotItem], scope: BatchScope) {
         guard scanBatchTask == nil, scanTasks.isEmpty, requireScanning() else { return }
 
@@ -1403,8 +1406,6 @@ final class AnalysisCoordinator {
         if let first = targets.first { pointReadout(at: first) }
         phase = .valuing
         statusText = "Appraising \(targets.count) \(scope.jobPhrase) with \(settings.activeModelID)"
-        // A fresh batch re-reads every lot's page rather than reusing galleries from an earlier run.
-        lotPageSubjects.removeAll()
         log(
             "Scanning \(targets.count) \(scope.jobPhrase) with \(settings.provider.displayName) "
                 + "\(settings.activeModelID), \(settings.photoRouteSummary) on each lot page, "
@@ -1414,7 +1415,7 @@ final class AnalysisCoordinator {
         let service = makeValuationService(settings, batchScanReporter())
         let concurrency = AppSettings.batchConcurrency
         scanBatchTask = Task { @MainActor [weak self] in
-            await self?.valuate(targets, using: service, concurrency: concurrency)
+            await self?.appraiseEach(targets, using: service, concurrency: concurrency)
             guard let self else { return }
             // As above in `prePriceUnvalued`: this task's own cancellation is what closes the batch.
             let cancelled = Task.isCancelled
@@ -1458,7 +1459,10 @@ final class AnalysisCoordinator {
             apply(error, to: lot)
         }
 
-        guard scanTasks.isEmpty else { return }
+        // A batch closes with its own words (`finishBatch`), even though every row that came back from
+        // it passes through here: they are about the set the button was pressed for, not about whichever
+        // row landed last. A row click, which is the only other caller, has no batch open.
+        guard scanTasks.isEmpty, scanBatchTask == nil else { return }
         phase = scansWereStopped ? .stopped : .finished
         statusText = scansWereStopped ? "Stopped — \(countsSummary)" : "Finished — \(countsSummary)"
         if !scansWereStopped { log("Scan finished — \(countsSummary)") }
@@ -1472,70 +1476,78 @@ final class AnalysisCoordinator {
         log(stopped ? "Batch scan stopped" : "Batch scan finished — \(countsSummary)")
     }
 
-    /// Appraises `targets`, keeping at most `concurrency` requests in flight.
+    /// Prices `targets` by walking each of them the way the per-row button does — one lot's whole
+    /// appraisal at a time — keeping at most `concurrency` of those walks in flight.
     ///
-    /// The service is captured as a `Sendable` value so the child tasks never touch the
-    /// main-actor coordinator; results come back through the group and are applied here.
-    private func valuate(
+    /// Per lot: the row is put into its analyzing state, its own page is read (in the queueing loop, so
+    /// one page is read at a time while the model calls already in flight keep running), and then
+    /// `appraise` runs the lot's cheap pass and its photographed pass, in that order, and hands the
+    /// result to `finishScan` — the same call the row's own **Price** ends with.
+    ///
+    /// The batch used to sweep the cheap pass over *every* lot before pricing *any* of them. That was
+    /// the one thing it did that a click never does, and it is the reason a batch figure could disagree
+    /// with the row's own: a lot was priced after the whole board had already been given provisional
+    /// figures and after its own eval had long landed, instead of immediately behind it.
+    private func appraiseEach(
         _ targets: [LotItem],
         using service: ValuationService,
         concurrency: Int
     ) async {
         let width = min(max(concurrency, 1), max(targets.count, 1))
 
-        // Cheap first: whole-pallet guesses land on their rows while the photographed passes are
-        // still queued, so the table is useful during the expensive part of the run.
-        await prePrice(targets, using: service, concurrency: width, automatic: true)
-        if Task.isCancelled { return }
-
-        await withTaskGroup(of: (Int, Result<ValuationOutcome, Error>).self) { group in
+        await withTaskGroup(of: (lot: LotItem, result: Result<ValuationOutcome, Error>).self) { group in
             var next = 0
 
             while next < targets.count {
                 if Task.isCancelled { break }
-                let index = next
+                let lot = targets[next]
                 next += 1
-                targets[index].markAnalyzing()
-                let lot = targets[index]
-                // One lot page is read per lot, here, in the queueing loop: the GET overlaps the
-                // model calls already in flight rather than delaying the batch by a serial pass over
-                // every lot's page before the first request goes out.
+                lot.markAnalyzing()
+                // Read here, in the queueing loop: the listing's own web view can only be looking at
+                // one lot's page while it reads, so the reads are serialised and each lot's GET
+                // overlaps the model calls already in flight. Only this lot's page is read — the read is
+                // the first step of its own walk, and no other lot's page is touched.
                 let subject = await subjectForLotPage(lot)
+                // The child task is the lot's walk. `self` is captured rather than taken weakly: the
+                // group is awaited inside this main-actor method, so the coordinator outlives it, and
+                // `appraise` is where the walk lives. The service — one instance for the whole batch —
+                // is `Sendable`, and each walk's transport work happens off the main actor.
                 group.addTask {
-                    do {
-                        return (index, .success(try await service.value(subject: subject)))
-                    } catch {
-                        return (index, .failure(error))
-                    }
+                    (lot: lot, result: await self.appraise(lot, subject: subject, using: service))
                 }
-                // Wait for a slot to free up once the window is full.
+                // Wait for a slot to free up once the window is full. The lot travels with its own
+                // result, so a figure lands on the row that earned it and nowhere else.
                 if next < targets.count, next % width == 0, let finished = await group.next() {
-                    apply(finished, to: targets)
+                    finishScan(of: finished.lot, with: finished.result)
                 }
             }
 
             if Task.isCancelled { group.cancelAll() }
+            // Every walk that came back is routed to its row, including one the stop cancelled:
+            // `finishScan` hands a cancelled walk back as "not valued", which is what a **Stop** does to
+            // a clicked row. Discarding them here instead would leave those rows on their spinners with
+            // the batch's own closing words already spoken past them.
             for await finished in group {
-                if Task.isCancelled { continue }
-                apply(finished, to: targets)
+                finishScan(of: finished.lot, with: finished.result)
             }
         }
     }
 
-    /// Runs the cheap text-only first look over a batch.
+    /// The body of **Eval all** and **Eval selected**: one cheap text-only pass over `targets`, each
+    /// lot walked by itself.
+    ///
+    /// Those two buttons are this helper's only callers, and the filter below is this pass's own rule —
+    /// a lot that already carries a figure is not evaluated again, so pressing the button twice cannot
+    /// pay twice (deviation 17). The cheap pass that rides along in front of a **Price** is per-lot and
+    /// lives in `runPrePrice`, because a batch prices its lots one row's walk at a time (deviation 41).
     ///
     /// Bounded by the same batch width as the real appraisal so the pre-price pass cannot outspend
     /// the run it is warming up, and never fatal: a lot that cannot be pre-priced simply waits for its
     /// photographed valuation, which is what would have happened anyway.
-    ///
-    /// `automatic` is the difference between the two callers, exactly as in `runPrePrice`: the
-    /// "already has numbers" filter applies to the pass that rides along in front of a scan, while
-    /// **Eval all** has already decided that question for itself.
-    private func prePrice(
+    private func prePriceEach(
         _ targets: [LotItem],
         using service: ValuationService,
-        concurrency: Int,
-        automatic: Bool
+        concurrency: Int
     ) async {
         let pending = targets.filter { !$0.hasValuation && !$0.isPrePriced && !$0.isPrePricing }
         guard !pending.isEmpty else { return }
@@ -1545,70 +1557,53 @@ final class AnalysisCoordinator {
 
         let width = min(max(concurrency, 1), max(pending.count, 1))
 
-        await withTaskGroup(of: (Int, Result<PrePriceEstimate, Error>).self) { group in
+        await withTaskGroup(of: (lot: LotItem, result: Result<PrePriceEstimate, Error>).self) { group in
             var next = 0
 
             while next < pending.count {
                 if Task.isCancelled { break }
-                let index = next
+                let lot = pending[next]
                 next += 1
-                // Each lot's own page is read here, in the queueing loop, so the GETs overlap the
-                // model calls already in flight rather than delaying the batch behind one serial pass
-                // over every page. The same read feeds the photographed pass that follows, which is
-                // what `subjectForLotPage`'s cache is for.
-                let subject = await subjectForLotPage(pending[index])
+                // Each lot's page is read here, in the queueing loop: the listing's own web view can
+                // only be looking at one lot's page while it reads, so the reads are serialised, and
+                // each GET overlaps the model calls already in flight rather than delaying the batch
+                // behind one serial pass over every page. That page's own description is what this pass
+                // is built from (`subjectForLotPage`).
+                let subject = await subjectForLotPage(lot)
                 // Handed to the model: the readout says which step the row it is speaking for is on.
-                note(.evaluatingText, on: pending[index])
+                note(.evaluatingText, on: lot)
                 group.addTask {
                     do {
-                        return (index, .success(try await service.prePrice(subject: subject)))
+                        return (lot: lot, result: .success(try await service.prePrice(subject: subject)))
                     } catch {
-                        return (index, .failure(error))
+                        return (lot: lot, result: .failure(error))
                     }
                 }
                 if next < pending.count, next % width == 0, let finished = await group.next() {
-                    applyPrePrice(finished, to: pending)
+                    applyPrePrice(finished)
                 }
             }
 
             if Task.isCancelled { group.cancelAll() }
+            // Applied even when the pass was stopped, on the same terms as the photographed walk's
+            // results: the row is unwound where every other outcome unwinds it, and a cancelled request
+            // parks quietly (`recordPrePriceFailure`) instead of being dropped.
             for await finished in group {
-                if Task.isCancelled { continue }
-                applyPrePrice(finished, to: pending)
+                applyPrePrice(finished)
             }
         }
 
-        // Anything cancelled mid-flight must not sit on a spinner for the rest of the session.
+        // Lots whose turn never came — the queueing loop broke before it reached them — are put back
+        // too, so nothing sits on a spinner for the rest of the session.
         pending.filter(\.isPrePricing).forEach { $0.clearPrePricing() }
     }
 
-    /// Routes one batch pre-price to its row, by way of the same record helpers the single-row
-    /// button uses, so both routes log and park a row identically.
-    private func applyPrePrice(_ result: (Int, Result<PrePriceEstimate, Error>), to targets: [LotItem]) {
-        let index = result.0
-        guard targets.indices.contains(index) else { return }
-        let lot = targets[index]
-
-        switch result.1 {
-        case .success(let estimate): record(estimate, on: lot)
-        case .failure(let error): recordPrePriceFailure(error, on: lot)
-        }
-    }
-
-    /// Routes one grouped result to its row.
-    private func apply(_ result: (Int, Result<ValuationOutcome, Error>), to targets: [LotItem]) {
-        let index = result.0
-        guard targets.indices.contains(index) else { return }
-        let lot = targets[index]
-
-        switch result.1 {
-        case .success(let outcome):
-            apply(outcome, to: lot)
-        case .failure(let error) where Self.isCancellation(error):
-            // The batch was stopped: hand the row back as "not valued" so it can be scanned again.
-            lot.resetValuation()
-        case .failure(let error):
-            apply(error, to: lot)
+    /// Records one cheap pass's result on the row that earned it, through the same `record` helpers the
+    /// single-row **Eval** button uses, so both routes log and park a row identically.
+    private func applyPrePrice(_ finished: (lot: LotItem, result: Result<PrePriceEstimate, Error>)) {
+        switch finished.result {
+        case .success(let estimate): record(estimate, on: finished.lot)
+        case .failure(let error): recordPrePriceFailure(error, on: finished.lot)
         }
     }
 

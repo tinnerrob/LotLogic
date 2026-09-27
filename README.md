@@ -243,7 +243,7 @@ PalletAuctionBidTool/
 │                                    per-photograph and two-pass routes as its fallbacks)
 ├── ViewModels/
 │   └── AnalysisCoordinator.swift    @MainActor @Observable pipeline + progress/derived state, and the
-│                                    per-action cache of each lot's page (gallery + description)
+│                                    one lot-page read (gallery + description) each walk starts with
 └── Views/
     ├── ContentView.swift            Layout: control panel, table, console — and the launch splash
     │                                over the lot of them
@@ -420,7 +420,9 @@ call a provider. A lot handed to the coordinator already carries the number the 
    run's session behind it, so it arrives signed in. Safari stays one click away in that sheet's
    header, and the sheet's own edges are drag handles — the page area opens at the size it always
    has and can be pulled out to whatever the photographs want. The toolbar does the same pair for
-   every lot at once (**Eval all** / **Price all**),
+   every lot at once (**Eval all** / **Price all**) — one lot at a time, each of them walked exactly
+   as its row's own button walks it, so which button paid for a lot cannot change how it is priced
+   (deviation 41) —
    skipping only lots that already have the figure
    being asked for — a lot the site has marked sold is still priceable (deviation 22). Several rows
    may scan at once; outbound calls are spaced by the shared `RequestPacer` so
@@ -941,11 +943,14 @@ driving a consumer web page" is not, deliberately.
     only scrapes; a lot is priced when its **Eval** or **Price** button is pressed, or when
     one of the toolbar's two all-lots buttons is. Rationale: the brief's "value every lot" spends a
     request on every row of a 200-lot page before the operator has seen a single bid, and most rows
-    are never worth opening. Nothing else changed: the same
-    `valuate(_:using:concurrency:)` task group drives both **Price all** and the old
-    automatic pass, `AppSettings.batchConcurrency` still bounds it, and **Stop** still cancels
-    everything in flight
-    — a cancelled row simply returns to "not valued".
+    are never worth opening. Nothing else changed: **Price all** and **Price selected** keep the same
+    bounded task group (`appraiseEach(_:using:concurrency:)`) and the same width
+    (`AppSettings.batchConcurrency`), now walking each lot by the row's own
+    `appraise(_:subject:using:)` — its page and its cheap pass included (deviation 41) — **Eval all**
+    and **Eval selected** keep theirs (`prePriceEach(_:using:concurrency:)`, one text-only request per
+    lot), and **Stop** still cancels everything in flight
+    — a cancelled row simply returns to "not valued", whether it was clicked or walking in a batch
+    (deviation 41).
 13. **DeepSeek's scan is a manifest pass plus a pricing pass, and its older two-pass route survives as
     the fallback.** The photographs go out in batches, each batch answers with the distinct products it
     shows, the batches are folded into one inventory on this machine, and that inventory is priced in a
@@ -1324,9 +1329,10 @@ driving a consumer web page" is not, deliberately.
     `40 of 46 image(s), 6 over the inline budget`. (d) *It costs one extra request per lot.* About 1 GET on the auction host per
     scanned lot, which is why it happens at **scan** time rather than at scrape time: a board of 200
     lots where three are ever scanned pays for three page reads, and a sold or ignored lot pays
-    nothing. One lot page is read per lot per action — the page's gallery is cached for the length of
-    that action, so the pre-price pass and the photographed pass that follows it share one GET rather
-    than fetching the same page twice, and clearing the cache is what makes a re-click re-read it.
+    nothing. One lot page is read per lot per action: the walk that prices a lot reads it as its own
+    first step and hands what it read to both of that walk's passes, so the cheap pass and the
+    photographed pass share one GET rather than fetching the same page twice — and because nothing is
+    remembered past the walk, a re-click re-reads the listing as it stands rather than an old gallery.
 
 25. **The table is one family of chips, one untitled control column, and a header that reads as
     chrome.** The visual pass over `LotTableView` / `LotTableRow` grew out of one concrete complaint —
@@ -1632,6 +1638,10 @@ driving a consumer web page" is not, deliberately.
     checking a row and pressing the button is an explicit request, exactly as **Re-eval** is. **Price
     selected** adds no filter at all: a checked row is the operator naming those lots, the same standing
     **Re-price** already has.
+    And because the two share the body, they share the *order of work inside a lot*: each lot in a batch
+    runs the row's own walk — its page, its cheap pass, then its photographed pass — and finishes in the
+    call a click finishes in, rather than the batch-wide cheap sweep the set used to run before any of it
+    was priced (deviation 41).
     **(e) The checkbox column is chrome, and it lines up.** `LotColumn.selection` — 24 points, narrower
     than the chevron beside it because a checkbox is aimed at rather than read — sits at the head of
     `chromeWidth`, so it is never stretched, and at the head of `identityWidth`, so a nested product
@@ -2011,6 +2021,33 @@ driving a consumer web page" is not, deliberately.
     run. Check 50b grew the rule's other end: the width off leaves the role inert in that direction too,
     and DeepSeek named as its own reader is not a split. Checks 33, 37, 38, 39 and 44–50 are unchanged and
     still green, which is what says the extraction was a move rather than a rewrite.
+
+---
+
+41. **A batch prices every lot the way that lot's own row would, one lot at a time.** **Price all** and
+    **Price selected** used to do the one thing no click does: sweep the cheap text-only pass over
+    *every* lot in the set first, and only then start the photographed passes — flushing every lot's
+    cached page on the way in. A lot was therefore priced by a walk no click ever makes: the page its
+    passes were built from was the one read at the head of that board-wide sweep rather than one read for
+    the lot when its turn came, and its cheap pass had been run for every other lot in the set before its
+    own passes began. For the last rows of a 200-lot set that is a page read and an eval minutes old,
+    behind a queue of work the click never builds, so what decided the difference between a batch figure
+    and a clicked one was nothing the operator could see — the size of the set, and how long the sweep in
+    front of it took. Each lot in a batch now runs `appraise(_:subject:using:)`, which *is* the row
+    button's walk in the row button's order (its page, its cheap pass, its photographed pass), from the
+    same page-derived subject, and each one ends in `finishScan(of:with:)` — the call a click ends in — so
+    a batch figure and a clicked figure are bought the same way and unwound the same way — a **Stop**
+    included, where a row whose walk it cancelled goes back to "not valued" through that call rather than
+    being dropped on a spinner the batch's closing words have already spoken past. What the batch
+    still adds is only what a series of clicks cannot do for itself: the job is the button's set rather
+    than one row's, at most `AppSettings.batchConcurrency` walks are in flight, one service — and so one
+    `RequestPacer` — pays for the whole batch, and each lot's page is read in the queueing loop, one page
+    at a time because the listing's own web view can only be looking at one while it reads, while the
+    model calls already in flight keep running. Nothing outlives the walk that read it either: there is no
+    page cache left to clear, because the page is now the first step of one lot's own walk rather than
+    something a board-wide sweep stocked on the way in, so an old gallery can never stand in for this
+    retry and a re-click re-reads the listing as it stands. Cost and coverage are unchanged — the same
+    requests, the same width, the same rows — only their order within a lot is now the row's.
 
 ---
 
